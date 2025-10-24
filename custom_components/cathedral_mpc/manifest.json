@@ -1,0 +1,11 @@
+{
+  "domain": "cathedral_mpc",
+  "name": "Cathedral MPC",
+  "version": "1.0.0",
+  "documentation": "https://example.invalid/cathedral_mpc",
+  "requirements": [],
+  "codeowners": [
+    "@cathedral"
+  ],
+  "config_flow": true
+}

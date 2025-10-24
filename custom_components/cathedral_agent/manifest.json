@@ -1,0 +1,13 @@
+{
+  "domain": "cathedral_agent",
+  "name": "Cathedral Agent",
+  "version": "1.0.0",
+  "documentation": "https://example.invalid/cathedral_agent",
+  "requirements": [],
+  "codeowners": [
+    "@cathedral"
+  ],
+  "dependencies": [
+    "conversation"
+  ]
+}
