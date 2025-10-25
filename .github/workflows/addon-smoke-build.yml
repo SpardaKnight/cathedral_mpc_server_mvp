@@ -1,0 +1,13 @@
+name: addon-smoke-build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build add-on (Docker parity test)
+        run: make -C dev build_amd64

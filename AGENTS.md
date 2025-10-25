@@ -15,6 +15,7 @@
 6. Do not switch away from Debian+`/opt/venv` or fall back to system `pip`/Alpine bases.
 7. Keep ports and filesystem paths stable: `/opt/app/orchestrator`, `/opt/venv`, `/data` mounts.
 8. Treat docs as first-class: any behavioral or manifest change must update the MegaDoc, schema docs, and CHANGELOG in the same PR.
+9. The only authorized test is the Docker build acceptance test that validates add-on installation and visibility inside Home Assistant. No other test suites, mock servers, or network simulations are permitted. Codex must not run or recreate any non-Docker test.
 
 ## Task Classes & Acceptance
 - Documentation-only updates must honor the guardrails and keep schema references accurate.
@@ -33,3 +34,4 @@
 - `curl -s http://homeassistant.local:8001/v1/models | jq`
 - `curl -s http://homeassistant.local:8001/v1/embeddings -H 'Content-Type: application/json' -d '{"input":"ping","model":"<your-embed-model-id>"}'`
 - After repository updates, use **⋮ → Reload** in the Add-on Store if the add-on is not visible.
+
