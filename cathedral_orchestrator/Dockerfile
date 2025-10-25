@@ -1,17 +1,22 @@
-ARG BUILD_FROM=ghcr.io/home-assistant/amd64-debian:bookworm
+ARG BUILD_FROM
 FROM $BUILD_FROM
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    VIRTUAL_ENV=/opt/venv \
+    PYTHONUNBUFFERED=1
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ENV VIRTUAL_ENV=/opt/venv \
     PATH="/opt/venv/bin:$PATH"
 
-# Debian base; install Python and tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-venv python3-pip bash curl jq ca-certificates \
     build-essential git && \
-    python3 -m venv /opt/venv && \
-    pip install --no-cache-dir --upgrade pip
+    rm -rf /var/lib/apt/lists/*
+
+# Create and use venv at /opt/venv
+RUN python3 -m venv /opt/venv && \
+    /opt/venv/bin/python -m pip install --no-cache-dir --upgrade pip
 
 WORKDIR /opt/app
 
@@ -21,7 +26,7 @@ COPY run.sh /opt/app/run.sh
 RUN chmod +x /opt/app/run.sh
 
 # Pinned runtime deps
-RUN pip install --no-cache-dir \
+RUN /opt/venv/bin/pip install --no-cache-dir \
       fastapi==0.115.0 \
       uvicorn==0.30.6 \
       httpx==0.27.2 \
