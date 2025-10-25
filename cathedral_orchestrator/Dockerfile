@@ -1,29 +1,29 @@
-ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base:3.19
+ARG BUILD_FROM=ghcr.io/home-assistant/amd64-debian:bookworm
 FROM $BUILD_FROM
 
-# Quieter Python, unbuffered logs
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
-# Alpine base; install Python toolchain + build deps + tools required by run.sh
-RUN apk add --no-cache \
-    python3 py3-pip py3-setuptools py3-wheel \
-    py3-onnxruntime \
-    build-base rust cargo musl-dev cmake \
-    bash curl jq
+# System deps for Python builds and runtime
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      python3 python3-venv python3-pip python3-dev \
+      build-essential cmake git curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/app
 
-# Copy orchestrator and entrypoint
-COPY orchestrator/ /opt/app/orchestrator/
+# Copy source
+COPY orchestrator/ /opt/app/origin/
 COPY run.sh /opt/app/run.sh
 RUN chmod +x /opt/app/run.sh
 
-# Create an isolated Python env (PEP 668-compliant) and install runtime deps
-RUN python3 -m venv /opt/venv
-ENV PATH="/opt/venv/bin:${PATH}"
-RUN python -m pip install --no-cache-dir --upgrade pip && \
-    python -m pip install --no-cache-dir \
+# Create venv (PEP-668-compliant) and install runtime deps
+RUN python3 -m venv /opt/venv \
+ && . /opt/venv/bin/activate \
+ && pip install --upgrade pip \
+ && pip install --no-cache-dir \
       fastapi==0.115.0 \
       uvicorn==0.30.6 \
       httpx==0.27.2 \
@@ -35,5 +35,11 @@ RUN python -m pip install --no-cache-dir --upgrade pip && \
       aiosqlite==0.20.0 \
       chromadb==0.5.12
 
-EXPOSE 8001 5005
+# Expose runtime env so run.sh can find the venv python/pip
+ENV PATH="/opt/venv/bin:${PATH}"
+
+# Move app code to /opt/app/orchestrator (keeps your current run.sh happy)
+RUN mv /opt/app/origin /opt/app/orchestrator
+
+EXPOSE 8001 5007
 CMD ["/opt/app/run.sh"]

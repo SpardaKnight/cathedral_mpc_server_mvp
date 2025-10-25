@@ -1,11 +1,9 @@
 name: Cathedral Orchestrator
 slug: cathedral_orchestrator
-version: "0.1.1"
 description: OpenAI-compatible relay + MPC server for Cathedral
+version: "0.1.1"
 arch:
   - amd64
-  - aarch64
-  - armv7
 startup: application
 boot: auto
 hassio_api: true
