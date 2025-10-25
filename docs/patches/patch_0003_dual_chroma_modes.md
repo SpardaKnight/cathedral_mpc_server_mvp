@@ -8,5 +8,5 @@
 
 ## Testing
 - `pytest`
-- `ruff check addons/cathedral_orchestrator/orchestrator`
-- `mypy --follow-imports=skip addons/cathedral_orchestrator/orchestrator`
+- `ruff check cathedral_orchestrator/orchestrator`
+- `mypy --follow-imports=skip cathedral_orchestrator/orchestrator`

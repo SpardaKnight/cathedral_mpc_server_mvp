@@ -12,7 +12,7 @@ Updated: 2025-10-24T23:07:38.826014Z
 
 ## Install — Add-on
 
-1. Copy `addons/cathedral_orchestrator/` into your local add-on repository folder.
+1. Copy `cathedral_orchestrator/` into your local add-on repository folder.
 2. In HA UI → Settings → Add-ons → Add-on Store → “⋮” → Repositories → Add local path.
 3. Open the **Cathedral Orchestrator** add-on → Configure options:
    - `lm_hosts`: map host name → base URL (e.g., `{"default": "http://192.168.1.71:1234"}`).

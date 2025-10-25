@@ -20,10 +20,10 @@ for m in mods:
     importlib.import_module(m)
     print("OK:", m)
 PY`
-- `ruff check addons/cathedral_orchestrator/orchestrator/main.py addons/cathedral_orchestrator/orchestrator/mpc_server.py`
-- `ruff check addons/cathedral_orchestrator/orchestrator/sessions.py`
-- `ruff check addons/cathedral_orchestrator/orchestrator/vector/chroma_client.py`
-- `mypy --follow-imports=skip addons/cathedral_orchestrator/orchestrator/main.py`
-- `mypy --follow-imports=skip addons/cathedral_orchestrator/orchestrator/mpc_server.py`
-- `mypy --follow-imports=skip addons/cathedral_orchestrator/orchestrator/sessions.py`
+- `ruff check cathedral_orchestrator/orchestrator/main.py cathedral_orchestrator/orchestrator/mpc_server.py`
+- `ruff check cathedral_orchestrator/orchestrator/sessions.py`
+- `ruff check cathedral_orchestrator/orchestrator/vector/chroma_client.py`
+- `mypy --follow-imports=skip cathedral_orchestrator/orchestrator/main.py`
+- `mypy --follow-imports=skip cathedral_orchestrator/orchestrator/mpc_server.py`
+- `mypy --follow-imports=skip cathedral_orchestrator/orchestrator/sessions.py`
 - `pytest`

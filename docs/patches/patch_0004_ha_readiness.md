@@ -6,4 +6,4 @@
 - update the Home Assistant add-on manifest with dual-mode Chroma options and the upsert toggle
 
 ## Verification
-- `python -m compileall addons/cathedral_orchestrator/orchestrator`
+- `python -m compileall cathedral_orchestrator/orchestrator`
