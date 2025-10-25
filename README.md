@@ -1,202 +1,248 @@
-Cathedral Orchestrator (Home Assistant add-on)
+# Cathedral Orchestrator (Home Assistant Add-on)
 
-OpenAI-compatible relay and MPC WebSocket server that runs inside Home Assistant and routes all LLM work to LM Studio on your Windows GPU box. Semantic memory is persisted to Chroma (either an external Chroma server on Windows or an embedded store inside the add-on).
+Cathedral Orchestrator is a Home Assistant (HA) **Supervisor add-on** that exposes:
+- **OpenAI-compatible HTTP endpoints** (`/v1/models`, `/v1/chat/completions`, `/v1/embeddings`) to relay requests to **LM Studio** on your Windows GPU host.
+- An **MPC WebSocket server** at `/mcp` for session/config/memory coordination, delegating `tools.*` actions to Home Assistant’s LLM API.
 
-GPU work (chat + embeddings) happens on your 5090 via LM Studio.
+**Embeddings and chat generation are always performed by LM Studio on your GPU**. The orchestrator never embeds locally. Vector storage is handled by **Chroma** using one of two modes:
+- **HTTP mode**: the add-on connects to an external Chroma server (recommended; run it on your 5090 or another host).
+- **Embedded mode**: the add-on uses an embedded Chroma client that persists under `/data/chroma` inside the add-on.
 
-Chroma stores vectors on CPU and can run externally (recommended) or embedded in the add-on.
+A **single‑writer switch** (`upserts_enabled`) ensures only one system writes vectors to Chroma (Orchestrator or AnythingLLM).
 
-What you get
+---
 
-/v1/models, /v1/chat/completions (SSE), /v1/embeddings — OpenAI-compatible endpoints proxied to LM Studio
+## Contents
+- [Architecture](#architecture)
+- [Requirements](#requirements)
+- [Install in Home Assistant](#install-in-home-assistant)
+  - [Option A — Local Add-on (private repo)](#option-a--local-add-on-private-repo)
+  - [Option B — Add-on Store Repository (public repos only)](#option-b--add-on-store-repository-public-repos-only)
+  - [Configure the add-on](#configure-the-add-on)
+  - [Start and validate](#start-and-validate)
+- [Set up the Windows 5090 node](#set-up-the-windows-5090-node)
+  - [LM Studio (GPU)](#lm-studio-gpu)
+  - [Chroma (HTTP server)](#chroma-http-server)
+- [AnythingLLM wiring (optional)](#anythingllm-wiring-optional)
+- [Modes and recommended choices](#modes-and-recommended-choices)
+- [Troubleshooting](#troubleshooting)
+- [Security Notes](#security-notes)
 
-/mcp WebSocket — MPC server for session.*, memory.*, config.*, prompts.*, sampling.*, resources.*, agents.*; tools.* are delegated to HA’s LLM API
+---
 
-SQLite sessions stored in /data/sessions.db with aiosqlite + WAL
+## Architecture
 
-Chroma client (dual-mode)
+```
+AnythingLLM (Windows)
+ ├─ HTTP → HA Orchestrator /v1/*        # OpenAI-compatible relay to LM Studio
+ └─ WS  → HA Orchestrator /mcp          # MPC (session/config/memory), tools delegated to HA
 
-http → talk to a Chroma HTTP server (Windows 5090 or HA)
+Home Assistant Add-on: Cathedral Orchestrator
+ ├─ /v1/models | /v1/chat/completions | /v1/embeddings → LM Studio
+ ├─ Writes to Chroma (if upserts_enabled: true)
+ ├─ WS /mcp (session.*, memory.*, config.*, prompts.*, sampling.*, resources.*, agents.*)
+ └─ SQLite sessions at /data/sessions.db (aiosqlite + WAL)
 
-embedded → persist vectors inside the add-on under /data/chroma
+Windows 5090 (GPU)
+ ├─ LM Studio (OpenAI-compatible API on http://<5090-IP>:1234/v1)
+ └─ Optional: Chroma HTTP server (default :8000)
+```
 
-Single-writer switch for vectors (upserts_enabled) so either the Orchestrator or AnythingLLM writes to Chroma (not both)
+**Key points**
+- LM Studio performs all GPU work (chat + embeddings).
+- Chroma is CPU-only and stores vectors. Use HTTP mode for best performance, or embedded mode for simplicity.
+- Only one system should write vectors to Chroma to prevent duplicates (`upserts_enabled` flag in the add-on).
 
-Requirements
+---
 
-Home Assistant OS with Supervisor
+## Requirements
 
-Windows 11 GPU machine (your 5090) running LM Studio
-
-Optional: Chroma server on the 5090 (external mode). Otherwise use embedded mode.
+- **Home Assistant OS** with **Supervisor** (Add-ons capability)
+- A **Windows 11** machine with a **GPU** (e.g., 5090) running **LM Studio**
+- Optional but recommended: a **Chroma HTTP server** (can run on the 5090)
 
 Network:
+- HA must reach LM Studio on its base URL (e.g., `http://<5090-IP>:1234`).
+- If you use external Chroma, HA must reach `http://<CHROMA-HOST>:8000`.
 
-Home Assistant must reach LM Studio (e.g. http://<5090-IP>:1234)
+---
 
-If using external Chroma, HA must reach http://<CHROMA-HOST>:8000
+## Install in Home Assistant
 
-Quick install
+> Because this repository is private, the most reliable approach is a **Local Add-on** install (Option A).
 
-Add the add-on repository
-Settings → Add-ons → Add-on Store → ⋮ → Repositories → add:
+### Option A — Local Add-on (private repo)
 
-https://github.com/SpardaKnight/cathedral_mpc_server_mvp
+1. Install either **Studio Code Server** or **Samba Share** add-on in HA (to edit files under `/addons`).  
+2. Create a folder on your HA host (case sensitive):
+   ```
+   /addons/cathedral_orchestrator/
+   ```
+3. Copy the add-on content from this repository into that folder. The structure must include at minimum:
+   ```
+   addons/cathedral_orchestrator/
+     ├─ config.yaml
+     ├─ Dockerfile
+     ├─ run.sh
+     └─ orchestrator/
+         ├─ main.py
+         ├─ mpc_server.py
+         ├─ toolbridge.py
+         ├─ sse.py
+         ├─ logging_config.py
+         ├─ sessions.py
+         └─ vector/
+             └─ chroma_client.py
+   ```
+4. Go to **Settings → Add-ons → Add-on Store**. There should be a **Local add-ons** section showing **Cathedral Orchestrator**.
 
+### Option B — Add-on Store Repository (public repos only)
 
-Install the add-on
-Find Cathedral Orchestrator → Install → Configure (next section) → Start.
+If the repo is made public, you can add it as a repository:
+1. **Settings → Add-ons → Add-on Store → ⋮ → Repositories**
+2. Add repository URL:
+   ```
+   https://github.com/SpardaKnight/cathedral_mpc_server_mvp
+   ```
+3. Install **Cathedral Orchestrator** from the store.
 
-Configure options (Add-on → Configuration)
+> For private repos, HA cannot access the code directly from GitHub. Use Option A.
 
+### Configure the add-on
+
+Open the add-on **Configuration** tab and set the options. Minimal working config:
+
+```yaml
 lm_hosts: {"primary": "http://<5090-IP>:1234"}  # LM Studio base URL (no /v1)
 chroma_mode: "http"                              # "http" or "embedded"
-chroma_url: "http://<host>:8000"                 # only used in http mode
-chroma_persist_dir: "/data/chroma"               # used in embedded mode
+chroma_url: "http://<host>:8000"                 # used only in http mode
+chroma_persist_dir: "/data/chroma"               # used only in embedded mode
 collection_name: "cathedral"
 allowed_domains: ["light","switch","scene"]
 temperature: 0.7
 top_p: 0.9
 upserts_enabled: true                            # orchestrator writes vectors
+```
 
+**Single-writer rule**  
+If **AnythingLLM** writes vectors directly to Chroma, set `upserts_enabled: false` here to avoid duplicate inserts.
 
-Single-writer rule
-If you want AnythingLLM to be the only writer to Chroma, set upserts_enabled: false here to avoid duplicates.
+### Start and validate
 
-Start the add-on and confirm the logs show LM Studio models and Chroma health.
+1. Click **Start** on the add-on.  
+2. Check logs for:
+   - LM Studio model enumeration success
+   - Chroma health (HTTP mode) or embedded init
+3. From any LAN machine, verify:
+   ```bash
+   # Orchestrator health
+   curl -s http://<HA-IP>:8001/health | jq
 
-Set up the Windows 5090 node
-LM Studio (GPU)
+   # LM Studio reachable through relay
+   curl -s http://<HA-IP>:8001/v1/models | jq
 
-Install LM Studio and start its local API. Example base URL: http://<5090-IP>:1234
+   # Simple non-stream chat
+   curl -s http://<HA-IP>:8001/v1/chat/completions \
+     -H "Content-Type: application/json" \
+     -d '{"model":"<chat-model-id>","stream":false,"messages":[{"role":"user","content":"ping"}]}'
 
-Load your chat and embedding models.
+   # Embeddings (and upsert if enabled)
+   curl -s http://<HA-IP>:8001/v1/embeddings \
+     -H "Content-Type: application/json" \
+     -d '{"model":"<embed-model-id>","input":"hello vector db","metadata":{"workspace_id":"ws_demo","role":"user"}}'
+   ```
+   If using external Chroma:
+   ```bash
+   curl -s http://<CHROMA-HOST>:8000/docs | head -n 1
+   ```
 
-The add-on uses /v1/chat/completions and /v1/embeddings, so embeddings always run on your GPU.
+---
 
-Chroma (external mode, recommended)
+## Set up the Windows 5090 node
 
-PowerShell (Admin):
+### LM Studio (GPU)
 
+1. Install LM Studio and start its local API. Example: `http://<5090-IP>:1234`
+2. Load your **chat** model (for `/v1/chat/completions`) and **embedding** model (for `/v1/embeddings`).  
+3. Ensure Windows firewall allows inbound connections on the LM Studio port.
+
+### Chroma (HTTP server)
+
+External mode is recommended for larger datasets and clean separation from HA.
+
+PowerShell (Administrator):
+```powershell
 pip install chromadb
 $env:CHROMA_PORT=8000
 $env:CHROMA_PATH="D:\ChromaDB"
 chroma run --host 0.0.0.0 --port $env:CHROMA_PORT --path $env:CHROMA_PATH
-
+```
 
 Optional Windows firewall (LAN only):
-
+```powershell
 New-NetFirewallRule -DisplayName "Chroma 8000" -Direction Inbound -LocalPort 8000 -Protocol TCP -Action Allow
+```
 
-
-Add-on options:
-
+Add-on options for external Chroma:
+```yaml
 chroma_mode: "http"
 chroma_url: "http://<5090-IP>:8000"
+```
 
-Chroma (embedded mode)
-
-If you prefer simplicity:
-
+**Embedded mode** (simple start, smaller datasets):
+```yaml
 chroma_mode: "embedded"
 chroma_persist_dir: "/data/chroma"
+```
 
+---
 
-Vectors are stored inside the add-on under /data/chroma.
+## AnythingLLM wiring (optional)
 
-AnythingLLM wiring (optional)
+If you are using AnythingLLM alongside the Orchestrator:
 
-If you’re using AnythingLLM alongside the Orchestrator:
+- **LLM Provider**: LM Studio — Base `http://<5090-IP>:1234/v1`
+- **Embedder**: LM Studio — Base `http://<5090-IP>:1234/v1/embeddings`
+- **Vector DB**: Chroma — Endpoint `http://<host>:8000` (5090 or HA)
+- **MPC (optional)**: `ws://<HA-IP>:5005/mcp`
 
-LLM Provider: LM Studio — Base http://<5090-IP>:1234/v1
+**Important:** If A‑LLM writes vectors to Chroma, set the add-on `upserts_enabled: false` so the Orchestrator does not also write.
 
-Embedder: LM Studio — Base http://<5090-IP>:1234/v1/embeddings
+---
 
-Vector DB: Chroma — Endpoint http://<host>:8000 (your 5090 or HA)
+## Modes and recommended choices
 
-MPC (optional): ws://<HA-IP>:5005/mcp
+| Scenario | Setting | Why |
+|---|---|---|
+| Production‑like | `chroma_mode: "http"`, `chroma_url: "http://<5090-IP>:8000"` | Best performance; vectors live with your GPU host |
+| Simple start | `chroma_mode: "embedded"`, `chroma_persist_dir: "/data/chroma"` | Fewer moving parts; ideal for small to medium data |
+| Orchestrator is vector owner | `upserts_enabled: true` | Centralizes memory policy in one place |
+| AnythingLLM is vector owner | `upserts_enabled: false` | Keeps RAG fully inside A‑LLM |
 
-If A-LLM writes to Chroma directly, keep upserts_enabled: false in the add-on.
+---
 
-Validate the deployment
-# Orchestrator health
-curl -s http://<HA-IP>:8001/health | jq
+## Troubleshooting
 
-# LM Studio reachable through relay
-curl -s http://<HA-IP>:8001/v1/models | jq
+- **/v1/models fails**: `lm_hosts` must be the **base** of LM Studio (no `/v1`). Confirm Windows firewall rules.
+- **SSE stream cuts off**: This build sets streaming `read=None`; if you front HA with a proxy, increase its read timeout.
+- **Chroma unreachable**: In HTTP mode use the host LAN IP, not `127.0.0.1`. `/docs` should return 200.
+- **Duplicate vectors**: Ensure only one writer. If A‑LLM writes, set `upserts_enabled: false`.
+- **Slow replies**: All GPU work is in LM Studio. Verify the selected model and GPU utilization there.
 
-# Simple non-stream chat
-curl -s http://<HA-IP>:8001/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"<chat-model-id>","stream":false,"messages":[{"role":"user","content":"ping"}]}'
+---
 
-# Embeddings (and upsert if enabled)
-curl -s http://<HA-IP>:8001/v1/embeddings \
-  -H "Content-Type: application/json" \
-  -d '{"model":"<embed-model-id>","input":"hello vector db","metadata":{"workspace_id":"ws_demo","role":"user"}}'
+## Security Notes
 
+- The add-on uses the Supervisor token (`hassio_api: true`) to talk to HA; do not expose that value.  
+- Keep Orchestrator ports (8001, 5005) **LAN‑only**, or protect with an authenticating reverse proxy if you must expose.  
+- Keep Chroma LAN‑only. If exposed, front it with a reverse proxy enforcing auth headers/tokens.
 
-External Chroma health:
+---
 
-curl -s http://<CHROMA-HOST>:8000/docs | head -n 1
+## Maintainers & Structure
 
-How it works
+- Add-on root: `addons/cathedral_orchestrator/`  
+  - `config.yaml`, `Dockerfile`, `run.sh`  
+  - `orchestrator/` (`main.py`, `mpc_server.py`, `sessions.py`, `vector/chroma_client.py`, etc.)
 
-Relay: /v1/models, /v1/chat/completions, /v1/embeddings forward to LM Studio.
-Chat is streamed via SSE and closes with data: [DONE].
-
-Embeddings: always computed by LM Studio on your GPU.
-If upserts_enabled: true, vectors are then written to Chroma with metadata.
-
-Chroma:
-
-http mode uses chromadb.HttpClient(host, port)
-
-embedded mode uses chromadb.Client(Settings(persist_directory="/data/chroma", is_persistent=True))
-
-Sessions: stored under /data/sessions.db via aiosqlite + WAL.
-
-MPC: WebSocket at /mcp for session.*, memory.*, config.*, prompts.*, sampling.*, resources.*, agents.*.
-tools.* actions are delegated to HA’s LLM API and allow-listed domains.
-
-Common choices and modes
-Choice	Set this	When to use
-External Chroma (recommended)	chroma_mode: "http", chroma_url: "http://<5090-IP>:8000"	Best for larger datasets; vectors live with your GPU host
-Embedded Chroma	chroma_mode: "embedded", chroma_persist_dir: "/data/chroma"	Simpler; good for moderate size
-Orchestrator writes vectors	upserts_enabled: true	Centralize memory writes in Orchestrator
-A-LLM writes vectors	upserts_enabled: false	Keep RAG inside AnythingLLM
-Troubleshooting
-
-/v1/models fails: lm_hosts must be the base of LM Studio (no /v1). Check Windows firewall.
-
-SSE chat cuts off: this build sets read=None on the upstream timeout; also check any reverse proxies.
-
-Chroma unreachable: in external mode use the host LAN IP, not 127.0.0.1. /docs should return 200.
-
-Duplicate vectors: ensure only one writer. If A-LLM writes, set upserts_enabled: false.
-
-No GPU use: LM Studio must have both chat and embedding models running.
-
-Security notes
-
-The add-on uses the Supervisor token to talk to HA; no LLATs are needed.
-
-Keep HA ports 8001 and 5005 LAN-only unless you front them with an auth-enforcing reverse proxy.
-
-Keep Chroma LAN-only; if exposed, protect with a reverse proxy that adds an auth header.
-
-Uninstall / upgrade
-
-Stop and remove the add-on in HA.
-
-Embedded vectors live under /data/chroma (back up if needed).
-
-External vectors live in your Chroma --path directory (e.g., D:\ChromaDB).
-
-Maintainers
-
-Add-on: addons/cathedral_orchestrator/
-
-Endpoints: /v1/*, /mcp, /api/*
-
-Config source: /data/options.json (Supervisor writes), hot-apply via POST /api/options
+**Config source**: HA Supervisor writes `/data/options.json` inside the add-on; runtime changes can be hot‑applied through `POST /api/options`.
