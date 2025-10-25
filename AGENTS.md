@@ -17,6 +17,8 @@
 8. Treat docs as first-class: any behavioral or manifest change must update the MegaDoc, schema docs, and CHANGELOG in the same PR.
 9. The only authorized test is the Docker build acceptance test that validates add-on installation and visibility inside Home Assistant. No other test suites, mock servers, or network simulations are permitted. Codex must not run or recreate any non-Docker test.
 
+10. The base image MUST be supplied by Supervisor via `BUILD_FROM` and mapped through `build.json` to `ghcr.io/home-assistant/*-base-debian:bookworm`. Do not switch tags or hardcode a base in the Dockerfile. Local smoke builds must pass `--build-arg BUILD_FROM` explicitly.
+
 ## Task Classes & Acceptance
 - Documentation-only updates must honor the guardrails and keep schema references accurate.
 - Manifest/schema adjustments require matching updates across YAML, JSON, and docs.
