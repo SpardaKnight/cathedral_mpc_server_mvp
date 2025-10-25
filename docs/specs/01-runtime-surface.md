@@ -14,9 +14,7 @@
 
 ## WebSocket + MPC (port 5005)
 
-* `/mcp/ws` – Primary MPC WebSocket endpoint served by `MPCServer`. Clients must authenticate through Home Assistant. Supports streaming automation commands and responses.
-* `/mcp/schema` – Exposes MCP schema definitions used by Cathedral clients.
-* `/mcp/tools` – Lists available tool descriptors derived from `allowed_domains`.
+* `/mcp` – Primary MPC WebSocket endpoint served by `MPCServer`. Clients must authenticate through Home Assistant. Supports streaming automation commands and responses.
 
 MPC WebSocket sessions share the same asyncio event loop as FastAPI. Sessions persist state in `/data/sessions.db` and rely on SQLite WAL mode for concurrent reads.
 

@@ -4,11 +4,13 @@ Cathedral Orchestrator bridges Home Assistant with Cathedral’s OpenAI-compatib
 
 - **MegaDoc**: [docs/MegaDoc.md](docs/MegaDoc.md) – complete architecture, schema, and operator guidance.
 - **Smoke Build**: [docs/operations/smoke-build.md](docs/operations/smoke-build.md) – the only sanctioned validation path.
+- **Agents Guide**: [AGENTS.md](AGENTS.md) – rules for code agents and release discipline.
 
 ## Quick Install (Home Assistant Supervisor)
 1. Open **Settings → Add-ons → Add-on Store → ⋮ → Repositories**.
 2. Add `https://github.com/SpardaKnight/cathedral_mpc_server_mvp` (no `.git`).
 3. Press **⋮ → Reload** so Supervisor indexes the repository.
+   (If the add-on does not appear, reload again — the global search does not index custom repositories.)
 4. Install **Cathedral Orchestrator** from the *Cathedral* section (or *Local add-ons* if you copied the repo into `/addons/cathedral_orchestrator`).
 5. Configure options, save, and start the add-on. Hot updates can be applied later via `POST /api/options`, but persist through the UI to survive restarts.
 
@@ -55,7 +57,7 @@ curl -s http://homeassistant.local:8001/v1/models | jq
 # Embeddings relay example
 curl -s http://homeassistant.local:8001/v1/embeddings \
   -H "Content-Type: application/json" \
-  -d '{"input": "status check", "model": "text-embedding-3-large"}'
+  -d '{"input": "status check", "model": "<your-embed-model-id>"}'
 ```
 
 ## Development Parity
