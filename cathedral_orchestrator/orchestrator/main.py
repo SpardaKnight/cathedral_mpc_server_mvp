@@ -51,17 +51,20 @@ opts = load_options()
 
 
 def _normalize_lm_hosts(raw) -> Dict[str, str]:
-    # Accept dict, list[str], or str; return {name: url}
+    def _clean(u: str) -> str:
+        u = (u or "").strip().rstrip("/")
+        return u[:-3] if u.endswith("/v1") else u
+
     if isinstance(raw, dict):
-        return {str(k): str(v) for k, v in raw.items()}
+        return {k: _clean(v) for k, v in raw.items()}
     if isinstance(raw, list):
-        return {f"h{i}": str(u) for i, u in enumerate(raw)}
-    if isinstance(raw, str):
-        return {"primary": raw}
+        return {f"host_{i+1}": _clean(v) for i, v in enumerate(raw)}
+    if isinstance(raw, str) and raw:
+        return {"primary": _clean(raw)}
     return {}
 
 
-LM_HOSTS: Dict[str, str] = _normalize_lm_hosts(opts.get("lm_hosts", {}))
+LM_HOSTS: Dict[str, str] = _normalize_lm_hosts(opts.get("lm_hosts"))
 CHROMA_MODE: str = opts.get("chroma_mode", "http")  # "http" | "embedded"
 CHROMA_URL: str = opts.get("chroma_url", "http://127.0.0.1:8000")
 PERSIST_DIR: str = opts.get("chroma_persist_dir", "/data/chroma")
@@ -83,7 +86,7 @@ chroma = ChromaClient(
 tb = ToolBridge(ALLOWED_DOMAINS)
 set_server(MPCServer(toolbridge=tb, chroma=chroma))
 
-app.include_router(mpc_router)
+app.include_router(mpc_router, prefix="/mcp")
 
 async def list_models_from_host(client: httpx.AsyncClient, base: str) -> Tuple[str, List[Dict[str,Any]]]:
     url = base.rstrip("/") + "/v1/models"

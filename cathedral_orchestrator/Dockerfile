@@ -1,29 +1,27 @@
-ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base-debian:bookworm
+ARG BUILD_FROM
 FROM $BUILD_FROM
 
-ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    VIRTUAL_ENV=/opt/venv \
+    PATH="/opt/venv/bin:$PATH"
 
-# System deps for Python builds and runtime
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-      python3 python3-venv python3-pip python3-dev \
-      build-essential cmake git curl ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+# Debian base; install Python and tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-venv python3-pip bash curl jq ca-certificates \
+    build-essential git && \
+    python3 -m venv /opt/venv && \
+    pip install --no-cache-dir --upgrade pip
 
 WORKDIR /opt/app
 
-# Copy source (use origin and then move to orchestrator to keep run.sh paths)
-COPY orchestrator/ /opt/app/origin/
+# Copy orchestrator and entrypoint
+COPY orchestrator/ /opt/app/orchestrator/
 COPY run.sh /opt/app/run.sh
 RUN chmod +x /opt/app/run.sh
 
-# Create venv and install runtime deps (PEP 668 compliant)
-RUN python3 -m venv /opt/venv \
- && . /opt/venv/bin/activate \
- && pip install --upgrade pip \
- && pip install --no-cache-dir \
+# Pinned runtime deps
+RUN pip install --no-cache-dir \
       fastapi==0.115.0 \
       uvicorn==0.30.6 \
       httpx==0.27.2 \
@@ -34,12 +32,6 @@ RUN python3 -m venv /opt/venv \
       httptools==0.6.1 \
       aiosqlite==0.20.0 \
       chromadb==0.5.12
-
-# Expose runtime env so run.sh can find the venv python/pip
-ENV PATH="/opt/venv/bin:${PATH}"
-
-# Move app code to /opt/app/orchestrator (run.sh refers to this path)
-RUN mv /opt/app/origin /opt/app/orchestrator
 
 EXPOSE 8001 5005
 CMD ["/opt/app/run.sh"]
