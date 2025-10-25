@@ -35,5 +35,6 @@
 - `curl -s http://homeassistant.local:8001/v1/embeddings -H 'Content-Type: application/json' -d '{"input":"ping","model":"<your-embed-model-id>"}'`
 - After repository updates, use **⋮ → Reload** in the Add-on Store if the add-on is not visible.
 
+## Workflow Guardrails
 
 13. Codex-initiated runs (repository_dispatch) remain authorized. GitHub-hosted automatic Actions triggered by push or pull_request are prohibited to prevent consumption of hosted runner minutes.
