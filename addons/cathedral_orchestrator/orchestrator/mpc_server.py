@@ -1,10 +1,15 @@
-import json, time, asyncio, uuid, os
-from typing import Dict, Any
+import json
+import os
+import time
+import uuid
+from typing import Any, Dict, Optional
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from .toolbridge import ToolBridge
-from .vector.chroma_client import ChromaClient, ChromaConfig
+
 from . import sessions
-from .logging_config import setup_logging, jlog
+from .logging_config import setup_logging
+from .toolbridge import ToolBridge
+from .vector.chroma_client import ChromaClient
 
 router = APIRouter()
 
@@ -53,11 +58,23 @@ class MPCServer:
             conversation_id = msg.get("conversation_id")
             user_id = msg.get("user_id")
             persona_id = msg.get("persona_id")
-            thread_id = sessions.upsert_session(workspace_id, conversation_id, user_id, persona_id)
-            return {"ok": True, "thread_id": thread_id}
+            thread_id = msg.get("thread_id") or f"thr_{int(time.time()*1000):x}"
+            await sessions.upsert_session(
+                workspace_id,
+                thread_id,
+                conversation_id=conversation_id,
+                user_id=user_id,
+                persona_id=persona_id,
+            )
+            session = await sessions.get_session(workspace_id, thread_id)
+            return {"ok": True, "thread_id": thread_id, "session": session}
         elif action == "resume":
             thread_id = msg.get("thread_id")
-            row = sessions.get_session(workspace_id, thread_id)
+            if not thread_id:
+                return {"ok": False, "error": "thread_id_required"}
+            row = await sessions.get_session(workspace_id, thread_id)
+            if row:
+                await sessions.touch_session(workspace_id, thread_id)
             return {"ok": bool(row), "session": row}
         else:
             return {"ok": False, "error": "unknown_session_action"}
@@ -80,10 +97,12 @@ class MPCServer:
         # Minimal echo for spec completeness; can be extended in Phase-2+
         return {"ok": True, "echo": msg.get("payload", {})}
 
-mpc_server_singleton: MPCServer = None
+mpc_server_singleton: Optional[MPCServer] = None
 
 def get_server() -> MPCServer:
     global mpc_server_singleton
+    if mpc_server_singleton is None:
+        raise RuntimeError("MPC server not initialized")
     return mpc_server_singleton
 
 def set_server(server: MPCServer):

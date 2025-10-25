@@ -1,17 +1,15 @@
-#!/usr/bin/with-contenv bashio
-# Preflight: parse /data/options.json and check LM Studio & Chroma health before starting
-
+#!/usr/bin/env bash
 set -euo pipefail
 
-OPTIONS_FILE="/data/options.json"
-if [ ! -f "$OPTIONS_FILE" ]; then
+OPTS="/data/options.json"
+if [ ! -f "$OPTS" ]; then
   echo "[FATAL] Missing /data/options.json" >&2
   exit 1
 fi
 
-LM_HOSTS=$(jq -r '.lm_hosts | to_entries[] | .value' "$OPTIONS_FILE")
-CHROMA_MODE=$(jq -r '.chroma_mode' "$OPTIONS_FILE")
-CHROMA_URL=$(jq -r '.chroma_url' "$OPTIONS_FILE")
+LM_HOSTS=$(jq -r '.lm_hosts | to_entries[] | .value' "$OPTS")
+CHROMA_MODE=$(jq -r '.chroma_mode' "$OPTS")
+CHROMA_URL=$(jq -r '.chroma_url' "$OPTS")
 
 echo "[INFO] Preflight: LM Studio model lists"
 for host in $LM_HOSTS; do
@@ -28,5 +26,11 @@ if [ "$CHROMA_MODE" = "http" ]; then
   fi
 fi
 
-echo "[INFO] Starting Uvicorn on 0.0.0.0:8001"
-exec uvicorn orchestrator.main:app --host 0.0.0.0 --port 8001
+CPU=$(getconf _NPROCESSORS_ONLN || echo 2)
+WORKERS=$(( CPU * 2 ))
+
+echo "[INFO] Starting Uvicorn on 0.0.0.0:8001 with $WORKERS workers"
+exec uvicorn orchestrator.main:app \
+  --host 0.0.0.0 --port 8001 \
+  --loop auto \
+  --workers "${WORKERS}"
