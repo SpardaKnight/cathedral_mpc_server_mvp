@@ -1,0 +1,8 @@
+{
+  "name": "Cathedral MPC Bridge",
+  "hubId": "cathedral-mpc-bridge",
+  "version": "1.0.0",
+  "description": "Bridges AnythingLLM Desktop to the Cathedral Orchestrator MPC for config.read/write. No local server.",
+  "author": "Warmaster Charles (SpardaKnight)",
+  "main": "handler.js"
+}
