@@ -1,3 +1,9 @@
+# Status: WORK IN PROGRESS
+
+This repository is under active development. Interfaces, docs, and configuration keys may change. Follow the RUNBOOK for current install steps.
+
+[Project Status](./STATUS.md)
+
 # Cathedral Orchestrator (Home Assistant Add-on)
 
 Cathedral Orchestrator is a Home Assistant (HA) **Supervisor add-on** that exposes:

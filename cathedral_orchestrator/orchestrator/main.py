@@ -48,7 +48,20 @@ def load_options() -> Dict[str,Any]:
         return json.load(f)
 
 opts = load_options()
-LM_HOSTS: Dict[str,str] = opts.get("lm_hosts", {})
+
+
+def _normalize_lm_hosts(raw) -> Dict[str, str]:
+    # Accept dict, list[str], or str; return {name: url}
+    if isinstance(raw, dict):
+        return {str(k): str(v) for k, v in raw.items()}
+    if isinstance(raw, list):
+        return {f"h{i}": str(u) for i, u in enumerate(raw)}
+    if isinstance(raw, str):
+        return {"primary": raw}
+    return {}
+
+
+LM_HOSTS: Dict[str, str] = _normalize_lm_hosts(opts.get("lm_hosts", {}))
 CHROMA_MODE: str = opts.get("chroma_mode", "http")  # "http" | "embedded"
 CHROMA_URL: str = opts.get("chroma_url", "http://127.0.0.1:8000")
 PERSIST_DIR: str = opts.get("chroma_persist_dir", "/data/chroma")
@@ -121,7 +134,7 @@ async def api_set_options(request: Request):
     new_opts = await request.json()
     opts.update(new_opts)
     global LM_HOSTS, CHROMA_MODE, CHROMA_URL, PERSIST_DIR, COLLECTION_NAME, ALLOWED_DOMAINS, TEMP, TOP_P, UPSERTS_ENABLED, chroma
-    LM_HOSTS = opts.get("lm_hosts", LM_HOSTS)
+    LM_HOSTS = _normalize_lm_hosts(opts.get("lm_hosts", LM_HOSTS))
     CHROMA_MODE = opts.get("chroma_mode", CHROMA_MODE)
     CHROMA_URL = opts.get("chroma_url", CHROMA_URL)
     PERSIST_DIR = opts.get("chroma_persist_dir", PERSIST_DIR)

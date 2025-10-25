@@ -1,5 +1,7 @@
 # RUNBOOK — Cathedral MPC Server MVP
 
+Status: WORK IN PROGRESS. Behavior and options may change. Always use the default branch instructions.
+
 Updated: 2025-10-24T23:07:38.826014Z
 
 ## Prerequisites
