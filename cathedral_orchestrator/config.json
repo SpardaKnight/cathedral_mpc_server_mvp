@@ -13,7 +13,7 @@
   },
   "map": ["ssl", "share"],
   "options": {
-    "lm_hosts": { "primary": "http://192.168.1.233:1234" },
+    "lm_hosts": ["http://192.168.1.233:1234"],
     "chroma_mode": "http",
     "chroma_url": "http://192.168.1.42:8000",
     "chroma_persist_dir": "/data/chroma",
@@ -24,7 +24,7 @@
     "upserts_enabled": true
   },
   "schema": {
-    "lm_hosts": "dict",
+    "lm_hosts": "list(url)",
     "chroma_mode": "str",
     "chroma_url": "str?",
     "chroma_persist_dir": "str?",
