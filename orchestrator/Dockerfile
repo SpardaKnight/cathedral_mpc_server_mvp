@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Alpine base; install Python toolchain + build deps + tools required by run.sh
 RUN apk add --no-cache \
     python3 py3-pip py3-setuptools py3-wheel \
-    build-base rust cargo musl-dev \
+    build-base rust cargo musl-dev cmake \
     bash curl jq
 
 WORKDIR /opt/app
