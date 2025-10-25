@@ -99,7 +99,9 @@ Network:
          ├─ sessions.py
          └─ vector/
              └─ chroma_client.py
-   ```
+  ```
+   The add-on Dockerfile installs runtime Python packages into `/opt/venv` (PEP 668-compliant) on top of `ghcr.io/home-assistant/<arch>-base:3.19`.
+
 4. Go to **Settings → Add-ons → Add-on Store**. There should be a **Local add-ons** section showing **Cathedral Orchestrator**.
 
 ### Option B — Add-on Store Repository (public repos only)
