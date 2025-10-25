@@ -20,7 +20,7 @@ COPY run.sh /opt/app/run.sh
 RUN chmod +x /opt/app/run.sh
 
 # Create an isolated Python env (PEP 668-compliant) and install runtime deps
-RUN python3 -m venv --system-site-packages /opt/venv
+RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 RUN python -m pip install --no-cache-dir --upgrade pip && \
     python -m pip install --no-cache-dir \
