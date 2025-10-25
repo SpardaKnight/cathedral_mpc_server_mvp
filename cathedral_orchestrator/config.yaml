@@ -1,6 +1,6 @@
 name: Cathedral Orchestrator
 slug: cathedral_orchestrator
-version: "0.1.0"
+version: "0.1.1"
 description: OpenAI-compatible relay + MPC server for Cathedral
 arch:
   - amd64

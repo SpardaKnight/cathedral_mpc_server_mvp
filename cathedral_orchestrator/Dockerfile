@@ -18,11 +18,11 @@ COPY orchestrator/ /opt/app/orchestrator/
 COPY run.sh /opt/app/run.sh
 RUN chmod +x /opt/app/run.sh
 
-# Create an isolated Python environment (PEP 668 compliant) and install runtime deps
+# Create an isolated Python env (PEP 668-compliant) and install runtime deps
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
-RUN /opt/venv/bin/pip install --no-cache-dir --upgrade pip && \
-    /opt/venv/bin/pip install --no-cache-dir \
+RUN python -m pip install --no-cache-dir --upgrade pip && \
+    python -m pip install --no-cache-dir \
       fastapi==0.115.0 \
       uvicorn==0.30.6 \
       httpx==0.27.2 \
