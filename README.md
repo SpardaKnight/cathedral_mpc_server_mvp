@@ -76,11 +76,11 @@ Network:
 1. Install either **Studio Code Server** or **Samba Share** add-on in HA (to edit files under `/addons`).  
 2. Create a folder on your HA host (case sensitive):
    ```
-   /addons/cathedral_orchestrator/
+   /cathedral_orchestrator/
    ```
 3. Copy the add-on content from this repository into that folder. The structure must include at minimum:
    ```
-   addons/cathedral_orchestrator/
+   cathedral_orchestrator/
      ├─ config.yaml
      ├─ Dockerfile
      ├─ run.sh
@@ -241,7 +241,7 @@ If you are using AnythingLLM alongside the Orchestrator:
 
 ## Maintainers & Structure
 
-- Add-on root: `addons/cathedral_orchestrator/`  
+- Add-on root: `cathedral_orchestrator/`
   - `config.yaml`, `Dockerfile`, `run.sh`  
   - `orchestrator/` (`main.py`, `mpc_server.py`, `sessions.py`, `vector/chroma_client.py`, etc.)
 
