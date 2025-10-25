@@ -73,3 +73,53 @@ make -C dev build_amd64
 ```
 
 More details on build parity, security posture, concurrency, and operations live in [docs/](docs/__index__.md).
+
+## Repository Map — Separation of Concerns
+
+- Home Assistant add-on (server):
+  addons/cathedral_orchestrator/
+  → Provides MPC server at ws://<HA-IP>:5005/mcp and OpenAI relay at http://<HA-IP>:8001/v1/*
+  → Handles session.*, memory.*, prompts.*, config.*, sampling.*, resources.*, agents.*; delegates tools.* to HA.
+
+- AnythingLLM Desktop plugin (client):
+  clients/anythingllm_agent_skill/cathedral-mpc-bridge/
+  → Real Agent Skill that runs inside AnythingLLM Desktop (no local server).
+  → Reads/writes Desktop .env and answers config.read/config.write over the MPC channel to the HA add-on.
+
+## AnythingLLM Agent Skill — Cathedral MPC Bridge (Install & Configure)
+
+### What this is
+A real Agent Skill plugin for AnythingLLM Desktop that auto-starts a background bridge to the Cathedral Orchestrator MPC server. It does not open ports or run a server on Windows.
+
+### Install (Windows)
+1) Open Desktop storage:
+   C:\Users\<YOU>\AppData\Roaming\anythingllm-desktop\storage
+2) Create folder:
+   plugins\agent-skills\cathedral-mpc-bridge
+3) From this repo, copy into that folder:
+   clients/anythingllm_agent_skill/cathedral-mpc-bridge/plugin.json
+   clients/anythingllm_agent_skill/cathedral-mpc-bridge/handler.js
+4) Edit handler.js and set your HA token:
+   const AUTH = "Bearer <YOUR_LONG_LIVED_TOKEN_HERE>";
+   (Keep the 'Bearer ' prefix.)
+5) In AnythingLLM → Agent Skills → enable "Cathedral MPC Bridge".
+
+### Configuration
+- MPC endpoint (fixed): ws://homeassistant.local:5005/mcp
+- The plugin reads/writes:
+  %APPDATA%\anythingllm-desktop\storage\.env
+- Normalized keys returned on config.read:
+  LMSTUDIO_BASE_PATH, EMBEDDING_BASE_PATH, CHROMA_URL, VECTOR_DB, STORAGE_DIR
+- The plugin sends orchestrator_upserts_only: true and a proactive config.read.result after connect.
+
+### Verification
+- Desktop logs show:
+  [Cathedral-MPC-Bridge][info] Connected to ws://homeassistant.local:5005/mcp
+- HA add-on logs show: handshake → config.read.result
+- GET http://<HA-IP>:8001/v1/models returns merged model list; chat SSE ends with data: [DONE].
+
+### Troubleshooting
+- If not visible in Agent Skills, re-check the folder path:
+  %APPDATA%\anythingllm-desktop\storage\plugins\agent-skills\cathedral-mpc-bridge\
+- If connection fails, confirm HA add-on is running and IP/hostname is reachable.
+- Ensure AUTH token is present and has not expired.
