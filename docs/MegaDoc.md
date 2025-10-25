@@ -65,12 +65,12 @@ Full schema guidance lives in [docs/schemas/ADDON_OPTIONS.md](schemas/ADDON_OPTI
 
 ## Build & Base
 * `build.json` pins the add-on to Debian Bookworm via `ghcr.io/home-assistant/amd64-debian:bookworm`.
-* `Dockerfile` creates a virtual environment at `/opt/venv`, installs pinned Python packages (FastAPI, Uvicorn, HTTPX, Chroma, etc.), and copies application sources into `/opt/orchestrator`.
+* `Dockerfile` creates a virtual environment at `/opt/venv`, installs pinned Python packages (FastAPI, Uvicorn, HTTPX, Chroma, etc.), and copies application sources into `/opt/app/orchestrator`.
 * Supervisor builds images with `docker buildx build` under BuildKit. Operators can mirror the exact invocation (see [operations/smoke-build.md](operations/smoke-build.md)) to confirm the image constructs without running runtime tests.
 
 ## MCP
 * Implements MCP scopes `config.read` and `config.write` so Cathedral clients can fetch and persist Home Assistant tool settings.
-* MPC sessions are single-writer; the orchestrator enforces sequential command execution and streams updates via `/mcp/ws` with SSE fallbacks.
+* MPC sessions are single-writer; the orchestrator enforces sequential command execution and streams updates via `/mcp` with SSE fallbacks.
 * Expect the server to be ready to apply writes immediately after `/health` returns `{"ok": true}`.
 
 ## Known Foot-guns
@@ -86,7 +86,7 @@ curl -s http://homeassistant.local:8001/v1/models | jq
 # Embed a prompt via orchestrator
 curl -s http://homeassistant.local:8001/v1/embeddings \
   -H "Content-Type: application/json" \
-  -d '{"input": "Cathedral status", "model": "text-embedding-3-large"}'
+  -d '{"input": "Cathedral status", "model": "<your-embed-model-id>"}'
 
 # Hot-apply configuration while Supervisor persists options separately
 curl -s http://homeassistant.local:8001/api/options \

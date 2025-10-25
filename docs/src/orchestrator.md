@@ -8,7 +8,6 @@
 ## `mpc_server.py`
 - Declares the FastAPI router mounted at `/mcp` and manages the `MPCServer` singleton.
 - Coordinates WebSocket sessions, enforcing the single-writer rule for automation commands.
-- Surfaces MCP schema and tool descriptors derived from `ToolBridge`.
 
 ## `sessions.py`
 - Wraps SQLite persistence with WAL mode for MPC session storage.
