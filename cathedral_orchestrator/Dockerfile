@@ -8,6 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Alpine base; install Python toolchain + build deps + tools required by run.sh
 RUN apk add --no-cache \
     python3 py3-pip py3-setuptools py3-wheel \
+    py3-onnxruntime \
     build-base rust cargo musl-dev cmake \
     bash curl jq
 
@@ -18,11 +19,11 @@ COPY orchestrator/ /opt/app/orchestrator/
 COPY run.sh /opt/app/run.sh
 RUN chmod +x /opt/app/run.sh
 
-# Create an isolated Python environment (PEP 668 compliant) and install runtime deps
-RUN python3 -m venv /opt/venv
+# Create an isolated Python env (PEP 668-compliant) and install runtime deps
+RUN python3 -m venv --system-site-packages /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
-RUN /opt/venv/bin/pip install --no-cache-dir --upgrade pip && \
-    /opt/venv/bin/pip install --no-cache-dir \
+RUN python -m pip install --no-cache-dir --upgrade pip && \
+    python -m pip install --no-cache-dir \
       fastapi==0.115.0 \
       uvicorn==0.30.6 \
       httpx==0.27.2 \
