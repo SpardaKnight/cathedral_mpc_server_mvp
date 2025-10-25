@@ -1,4 +1,4 @@
-ARG BUILD_FROM=ghcr.io/home-assistant/amd64-debian:bookworm
+ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base-debian:bookworm
 FROM $BUILD_FROM
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -14,12 +14,12 @@ RUN apt-get update \
 
 WORKDIR /opt/app
 
-# Copy source
+# Copy source (use origin and then move to orchestrator to keep run.sh paths)
 COPY orchestrator/ /opt/app/origin/
 COPY run.sh /opt/app/run.sh
 RUN chmod +x /opt/app/run.sh
 
-# Create venv (PEP-668-compliant) and install runtime deps
+# Create venv and install runtime deps (PEP 668 compliant)
 RUN python3 -m venv /opt/venv \
  && . /opt/venv/bin/activate \
  && pip install --upgrade pip \
@@ -38,8 +38,8 @@ RUN python3 -m venv /opt/venv \
 # Expose runtime env so run.sh can find the venv python/pip
 ENV PATH="/opt/venv/bin:${PATH}"
 
-# Move app code to /opt/app/orchestrator (keeps your current run.sh happy)
+# Move app code to /opt/app/orchestrator (run.sh refers to this path)
 RUN mv /opt/app/origin /opt/app/orchestrator
 
-EXPOSE 8001 5007
+EXPOSE 8001 5005
 CMD ["/opt/app/run.sh"]
