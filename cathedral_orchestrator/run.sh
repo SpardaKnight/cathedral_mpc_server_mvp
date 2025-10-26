@@ -17,36 +17,28 @@ LM_HOSTS=$(jq -r '
 
 CHROMA_URL=$(jq -r '.chroma_url // empty' "$OPTS")
 
-ATTEMPTS=0
-MAX_ATTEMPTS=60
-
+# === Preflight: LM hosts ===
 for HOST in $LM_HOSTS; do
   TARGET="${HOST%/}/v1/models"
   echo "[WAIT] Probing LM host $TARGET"
   until curl -sS --fail "$TARGET" >/dev/null; do
-    ATTEMPTS=$((ATTEMPTS + 1))
-    if [ "$ATTEMPTS" -ge "$MAX_ATTEMPTS" ]; then
-      echo "[FATAL] Timeout waiting for LM host $TARGET" >&2
-      exit 1
-    fi
-    sleep 1
+    echo "[ERROR] LM host not reachable: $TARGET" >&2
+    sleep 2
   done
   echo "[READY] LM host $TARGET responded"
 done
 
+# === Preflight: Chroma ===
 if [ -n "${CHROMA_URL:-}" ]; then
   DOCS="${CHROMA_URL%/}/docs"
   echo "[WAIT] Probing Chroma docs at $DOCS"
   until curl -sS --fail "$DOCS" >/dev/null; do
-    ATTEMPTS=$((ATTEMPTS + 1))
-    if [ "$ATTEMPTS" -ge "$MAX_ATTEMPTS" ]; then
-      echo "[FATAL] Timeout waiting for Chroma docs at $DOCS" >&2
-      exit 1
-    fi
-    sleep 1
+    echo "[ERROR] Chroma not reachable: $DOCS" >&2
+    sleep 2
   done
   echo "[READY] Chroma docs available at $DOCS"
 fi
 
+# === Launch ===
 echo "[INFO] Launching Cathedral Orchestrator"
 exec uvicorn orchestrator.main:app --host 0.0.0.0 --port 8001
