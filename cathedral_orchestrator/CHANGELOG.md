@@ -1,5 +1,9 @@
 # Cathedral Orchestrator – Changelog
 
+## [1.1.12]
+- Implement heartbeat-first Chroma readiness with v2→v1→docs fallback and redirect following.
+- Make the session TTL prune scheduler idempotent so reloads spawn fresh threads without crashes.
+
 ## [1.1.11]
 - Add Supervisor Sync + s6 v3 hard rules to AGENTS.md and enforce them with static pytest guards.
 

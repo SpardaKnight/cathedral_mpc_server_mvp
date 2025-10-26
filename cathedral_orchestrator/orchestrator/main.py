@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import uuid
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -182,28 +183,71 @@ BOOTSTRAP_EVENT = asyncio.Event()
 PRUNE_INTERVAL_SECONDS = 15 * 60
 SESSION_TTL_MINUTES = 120
 
+_prune_thread: Optional[threading.Thread] = None
+_prune_stop = threading.Event()
 
-async def _session_prune_loop() -> None:
-    while True:
+
+def _prune_loop() -> None:
+    global _prune_thread
+    jlog(
+        logger,
+        event="session_prune_loop_started",
+        ttl_minutes=SESSION_TTL_MINUTES,
+        interval_seconds=PRUNE_INTERVAL_SECONDS,
+    )
+    while not _prune_stop.is_set():
         try:
-            pruned = await sessions.prune_idle(ttl_minutes=SESSION_TTL_MINUTES)
+            pruned = asyncio.run(sessions.prune_idle(ttl_minutes=SESSION_TTL_MINUTES))
             jlog(
                 logger,
                 event="session_prune_cycle",
                 pruned=pruned,
                 ttl_minutes=SESSION_TTL_MINUTES,
             )
-        except asyncio.CancelledError:
-            jlog(logger, event="session_prune_cycle_cancelled")
-            raise
         except Exception as exc:  # pragma: no cover - scheduler guard
             jlog(
                 logger,
                 level="ERROR",
                 event="session_prune_cycle_failed",
                 error=str(exc),
+                ttl_minutes=SESSION_TTL_MINUTES,
             )
-        await asyncio.sleep(PRUNE_INTERVAL_SECONDS)
+        if _prune_stop.wait(PRUNE_INTERVAL_SECONDS):
+            break
+    jlog(logger, event="session_prune_loop_stopped")
+    _prune_thread = None
+
+
+def _start_pruner_if_needed() -> None:
+    global _prune_thread
+    if _prune_thread and _prune_thread.is_alive():
+        jlog(logger, event="session_prune_loop_active")
+        return
+    _prune_stop.clear()
+    _prune_thread = threading.Thread(
+        target=_prune_loop,
+        name="ttl-pruner",
+        daemon=True,
+    )
+    _prune_thread.start()
+    jlog(logger, event="session_prune_loop_spawned")
+
+
+def stop_pruner() -> None:
+    global _prune_thread
+    thread = _prune_thread
+    jlog(logger, event="session_prune_loop_stop_requested")
+    _prune_stop.set()
+    if thread and thread.is_alive():
+        thread.join(timeout=5)
+        if thread.is_alive():
+            jlog(logger, level="WARN", event="session_prune_loop_stop_timeout")
+        else:
+            jlog(logger, event="session_prune_loop_joined")
+    else:
+        jlog(logger, event="session_prune_loop_not_running")
+    _prune_thread = None
+
 
 CHROMA_CONFIG = ChromaConfig(url=CHROMA_URL, collection_name=COLLECTION_NAME)
 CHROMA_CLIENT: Optional[ChromaClient] = None
@@ -367,17 +411,13 @@ async def lifespan(app: FastAPI):
         auto_config_allowed=auto_config_enabled,
     )
     set_server(server)
-    prune_task = asyncio.create_task(_session_prune_loop())
+    _start_pruner_if_needed()
     try:
         await reload_clients_from_options(dict(CURRENT_OPTIONS))
         await update_bootstrap_state(force_refresh=True)
         yield
     finally:
-        prune_task.cancel()
-        try:
-            await prune_task
-        except asyncio.CancelledError:  # pragma: no cover - shutdown guard
-            pass
+        stop_pruner()
         await asyncio.gather(*(client.aclose() for client in APP_CLIENTS.values()))
         APP_CLIENTS.clear()
 

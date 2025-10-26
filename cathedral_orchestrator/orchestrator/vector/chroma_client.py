@@ -47,20 +47,48 @@ class ChromaClient:
         if not base:
             jlog(logger, level="WARN", event="chroma_health_missing_url")
             return False
-        try:
-            resp = await self._client.get(f"{base}/docs", timeout=10)
-            ok = resp.status_code == 200
-            jlog(logger, event="chroma_health", url=base, ok=ok, status=resp.status_code)
-            return ok
-        except Exception as exc:  # pragma: no cover - network guard
-            jlog(
-                logger,
-                level="WARN",
-                event="chroma_health_error",
-                url=base,
-                error=str(exc),
-            )
-            return False
+
+        base = base.rstrip("/")
+        urls = [
+            f"{base}/api/v2/heartbeat",
+            f"{base}/api/v1/heartbeat",
+            f"{base}/docs",
+        ]
+
+        for url in urls:
+            try:
+                resp = await self._client.get(
+                    url, follow_redirects=True, timeout=5.0
+                )
+                status = resp.status_code
+                if 200 <= status < 400:
+                    jlog(
+                        logger,
+                        event="chroma_health",
+                        url=base,
+                        probe=url,
+                        ok=True,
+                        status=status,
+                    )
+                    return True
+                jlog(
+                    logger,
+                    level="WARN",
+                    event="chroma_health_probe_failed",
+                    url=url,
+                    status=status,
+                )
+            except Exception as exc:  # pragma: no cover - network guard
+                jlog(
+                    logger,
+                    level="WARN",
+                    event="chroma_health_probe_error",
+                    url=url,
+                    error=str(exc),
+                )
+
+        jlog(logger, level="WARN", event="chroma_health", url=base, ok=False)
+        return False
 
     async def ensure_collection(self, name: str) -> Optional[str]:
         if not name:
