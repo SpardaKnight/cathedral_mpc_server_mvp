@@ -19,7 +19,7 @@ repo root
 ```
 
 ## Runtime Surface
-* **HTTP 8001/tcp** – OpenAI-compatible REST endpoints: `/v1/models`, `/v1/chat/completions`, `/v1/embeddings`, plus `/api/options` for hot configuration and `/health` for readiness checks.
+* **HTTP 8001/tcp** – OpenAI-compatible REST endpoints: `/v1/models`, `/v1/chat/completions`, `/v1/embeddings`, plus `/api/options` for hot configuration and `/health` for readiness checks. Chat completions now stream directly from the dedicated LM Studio host at `http://192.168.1.175:1234` without inspecting the configured host list.
 * **WebSocket 5005/tcp** – MPC WebSocket server mounted under `/mcp`. Handles Cathedral tool flows and applies the single-writer constraint for automations.
 * **Supervisor APIs** – `/api/options` accepts JSON payloads to hot-apply configuration; `/api/status` surfaces current options for troubleshooting.
 
@@ -43,7 +43,7 @@ Full schema guidance lives in [docs/schemas/ADDON_OPTIONS.md](schemas/ADDON_OPTI
 * **Embedded mode**: the add-on runs Chroma in-process, persisting data under `/data/chroma`. Ensure Supervisor mounts enough disk. The health endpoint inspects the embedded client and reports readiness without issuing network calls.
 
 ## LM Studio Contract
-* Provide base URLs **without** `/v1` in the add-on options. The orchestrator appends `/v1/...` when routing requests.
+* Provide base URLs **without** `/v1` in the add-on options. The orchestrator appends `/v1/...` when routing embeddings and model discovery requests; chat completions are pinned to the dedicated LM Studio relay at `http://192.168.1.175:1234/v1/chat/completions`.
 * LM Studio’s embeddings endpoint expects GPU acceleration on Windows; specify hosts that expose `/v1/embeddings` or disable embeddings for read-only flows.
 * Multiple hosts are pooled; the orchestrator selects the first host that advertises the requested `model` from `/v1/models`.
 

@@ -10,14 +10,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from starlette.responses import JSONResponse
 from starlette.responses import PlainTextResponse  # noqa: F401
-from starlette.responses import StreamingResponse  # noqa: F401
 
 from . import sessions
 from .logging_config import jlog, setup_logging
 from .mpc_server import MPCServer, get_server, router as mpc_router, set_server
-from .sse import sse_proxy
 from .toolbridge import ToolBridge
 from .vector.chroma_client import ChromaClient, ChromaConfig
 
@@ -632,28 +631,20 @@ async def _route_for_model(model: str) -> str:
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(request: Request):
-    body = await request.json()
-    model = body.get("model")
-    target = await _route_for_model(model) if model else list(LM_HOSTS.values())[0]
-    url = target.rstrip("/") + "/v1/chat/completions"
-    stream = bool(body.get("stream", True))
-    headers = {"Content-Type": "application/json"}
-    client = APP_CLIENTS.get("lm")
-    if not client:
-        raise HTTPException(status_code=503, detail="client not ready")
-    req_bytes = json.dumps(body).encode("utf-8")
-    if stream:
-        async with client.stream(
+async def relay_chat_completions(request: Request):
+    async with httpx.AsyncClient(timeout=None) as client:
+        upstream = await client.stream(
             "POST",
-            url,
-            headers=headers,
-            content=req_bytes,
-            timeout=None,
-        ) as upstream:
-            return await sse_proxy(upstream.aiter_bytes())
-    response = await client.post(url, headers=headers, json=body)
-    return JSONResponse(response.json(), status_code=response.status_code)
+            "http://192.168.1.175:1234/v1/chat/completions",  # Update to real LM Studio IP if dynamic
+            headers=request.headers,
+            content=await request.body(),
+        )
+
+        async def forward():
+            async for chunk in upstream.aiter_raw():
+                yield chunk
+
+        return StreamingResponse(forward(), media_type="text/event-stream")
 
 
 @app.post("/v1/embeddings")
