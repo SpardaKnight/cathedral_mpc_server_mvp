@@ -1,5 +1,9 @@
 # Cathedral Orchestrator – Changelog
 
+## [1.1.14]
+- Point `/v1/chat/completions` directly at the dedicated LM Studio relay on `http://192.168.1.175:1234` using a raw streaming proxy.
+- Document the fixed upstream routing and bump Supervisor manifest version to release the relay update.
+
 ## [1.1.13]
 - Fix streaming relay to treat `httpx.StreamClosed` as a clean EOF and always emit the SSE `data: [DONE]` trailer.
 - Add `/api/v0/models` alias for legacy clients probing the deprecated path.

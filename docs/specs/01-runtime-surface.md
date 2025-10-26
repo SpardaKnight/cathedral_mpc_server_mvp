@@ -5,7 +5,7 @@
 | Path | Method | Description | Request Body | Response | Notes |
 | --- | --- | --- | --- | --- | --- |
 | `/v1/models` | GET | Lists models from all configured LM hosts. | None | `{ "object": "list", "data": [...] }` aggregated from upstream hosts. | Returns 503 if HTTP client pool not ready. Upstream errors are logged with `lm_models_fail`. |
-| `/v1/chat/completions` | POST | Proxies OpenAI Chat Completions. | OpenAI-compatible JSON (with optional `stream`). | Streaming SSE or JSON response from upstream host. | SSE streaming uses `text/event-stream` and terminates when upstream sends `[DONE]`. Hot options determine routing. |
+| `/v1/chat/completions` | POST | Relays OpenAI Chat Completions to LM Studio. | OpenAI-compatible JSON (with optional `stream`). | Streaming SSE response from LM Studio at `http://192.168.1.175:1234`. | Forwards raw `text/event-stream` packets exactly as received from LM Studio. |
 | `/v1/embeddings` | POST | Proxies embeddings requests. | `{ "input": ..., "model": ... }` | JSON embedding payload from selected host. | Chooses host via `_route_for_model`; falls back to first host configured. |
 | `/api/options` | GET | Returns current runtime options. | None | JSON options map matching Supervisor schema. | Used for diagnostics. |
 | `/api/options` | POST | Hot-applies new options. | JSON subset matching schema. | `{ "ok": true, "applied": {...} }` | Updates LM host map and reinitializes Chroma client in-place. Persist via Supervisor API for restart durability. |
