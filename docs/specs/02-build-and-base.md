@@ -2,11 +2,11 @@
 
 ## Base Image
 - **Source**: `ghcr.io/home-assistant/amd64-debian:bookworm`
-- **Rationale**: Debian Bookworm provides glibc-compatible wheels for `onnxruntime`, `uvloop`, and other dependencies bundled with Chroma. Alpine/musl is unsupported.
+- **Rationale**: Debian Bookworm provides glibc-compatible wheels for runtime dependencies such as `uvloop` and `httptools`. Chroma is consumed over HTTP, so no local database bindings are required.
 
 ## Virtual Environment
 - Created at `/opt/venv` during Docker build using `python3 -m venv /opt/venv`.
-- Pip upgraded before installing pinned packages: `fastapi`, `uvicorn[standard]`, `httpx`, `pydantic`, `tiktoken`, `websockets`, `uvloop`, `httptools`, `aiosqlite`, `chromadb`.
+- Pip upgraded before installing pinned packages: `fastapi`, `uvicorn`, `httpx`, `pydantic`, `tiktoken`, `websockets`, `uvloop`, `httptools`, `aiosqlite`. Chroma is accessed remotely.
 - Application code copied into `/opt/app/orchestrator` and executed via `/opt/venv/bin/python`.
 
 ## Supervisor Build Flags

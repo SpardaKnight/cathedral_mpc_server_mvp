@@ -1,102 +1,214 @@
 from __future__ import annotations
-import typing as t
-import os
-from dataclasses import dataclass
-from urllib.parse import urlparse
 
-from chromadb.config import Settings
+import asyncio
+import logging
+from dataclasses import dataclass
+from typing import Dict, Optional, Sequence
+
+import httpx
+
+from ..logging_config import jlog
+
+logger = logging.getLogger("cathedral")
 
 
 @dataclass
 class ChromaConfig:
-    mode: str = "http"  # "http" | "embedded"
-    url: str = "http://127.0.0.1:8000"
+    url: str = ""
     collection_name: str = "cathedral"
-    persist_dir: str = "/data/chroma"  # used only in embedded
-
-
-class _HTTPClient:
-    def __init__(self, url: str, collection: str):
-        import chromadb
-
-        parsed = urlparse(url)
-        host = parsed.hostname or "127.0.0.1"
-        port = parsed.port or 8000
-        self._client = chromadb.HttpClient(host=host, port=port, settings=Settings())
-        self._col = self._client.get_or_create_collection(name=collection, metadata={"hnsw:space": "cosine"})
-
-    def health(self) -> bool:
-        try:
-            _ = self._client.list_collections()
-            return True
-        except Exception:
-            return False
-
-    def upsert(
-        self,
-        ids: t.List[str],
-        embeddings: t.List[t.List[float]],
-        documents: t.List[str],
-        metadatas: t.List[dict],
-    ) -> dict:
-        try:
-            self._col.upsert(ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
-            return {"result": "ok", "upserted": len(ids)}
-        except Exception as e:
-            return {"result": "error", "error": str(e)}
-
-    def query(self, query_texts: t.List[str], n_results: int = 5, where: t.Optional[dict] = None) -> dict:
-        try:
-            res = self._col.query(query_texts=query_texts, n_results=n_results, where=where)
-            return {"result": "ok", "data": res}
-        except Exception as e:
-            return {"result": "error", "error": str(e)}
-
-
-class _EmbeddedClient:
-    def __init__(self, persist_dir: str, collection: str):
-        import chromadb
-
-        os.makedirs(persist_dir, exist_ok=True)
-        self._client = chromadb.Client(Settings(persist_directory=persist_dir, is_persistent=True))
-        self._col = self._client.get_or_create_collection(name=collection, metadata={"hnsw:space": "cosine"})
-
-    def health(self) -> bool:
-        try:
-            _ = self._client.list_collections()
-            return True
-        except Exception:
-            return False
-
-    def upsert(self, ids, embeddings, documents, metadatas):
-        try:
-            self._col.upsert(ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
-            return {"result": "ok", "upserted": len(ids)}
-        except Exception as e:
-            return {"result": "error", "error": str(e)}
-
-    def query(self, query_texts, n_results=5, where=None):
-        try:
-            res = self._col.query(query_texts=query_texts, n_results=n_results, where=where)
-            return {"result": "ok", "data": res}
-        except Exception as e:
-            return {"result": "error", "error": str(e)}
 
 
 class ChromaClient:
-    def __init__(self, cfg: ChromaConfig):
-        self.cfg = cfg
-        self._impl: t.Union[_EmbeddedClient, _HTTPClient]
-        if cfg.mode == "embedded":
-            self._impl = _EmbeddedClient(cfg.persist_dir, cfg.collection_name)
-        else:
-            self._impl = _HTTPClient(cfg.url, cfg.collection_name)
+    def __init__(self, http_client: httpx.AsyncClient, config: ChromaConfig):
+        self._client = http_client
+        self._config = config
+        self._collection_cache: Dict[str, str] = {}
+        self._lock = asyncio.Lock()
 
-    def health(self) -> bool:
-        return self._impl.health()
+    def update_config(self, config: ChromaConfig) -> None:
+        normalized = (config.url or "").rstrip("/")
+        previous = (self._config.url or "").rstrip("/")
+        self._config = config
+        if normalized != previous:
+            self._collection_cache.clear()
+            jlog(
+                logger,
+                event="chroma_config_updated",
+                url=normalized,
+                previous=previous,
+            )
 
-    def upsert(self, ids, embeddings, documents, metadatas):
-        return self._impl.upsert(ids, embeddings, documents, metadatas)
+    @property
+    def base_url(self) -> str:
+        return (self._config.url or "").rstrip("/")
 
-    def query(self, query_texts, n_results=5, where=None):
-        return self._impl.query(query_texts, n_results=n_results, where=where)
+    async def health_ok(self) -> bool:
+        base = self.base_url
+        if not base:
+            jlog(logger, level="WARN", event="chroma_health_missing_url")
+            return False
+        try:
+            resp = await self._client.get(f"{base}/docs", timeout=10)
+            ok = resp.status_code == 200
+            jlog(logger, event="chroma_health", url=base, ok=ok, status=resp.status_code)
+            return ok
+        except Exception as exc:  # pragma: no cover - network guard
+            jlog(
+                logger,
+                level="WARN",
+                event="chroma_health_error",
+                url=base,
+                error=str(exc),
+            )
+            return False
+
+    async def ensure_collection(self, name: str) -> Optional[str]:
+        if not name:
+            jlog(logger, level="ERROR", event="chroma_collection_invalid_name")
+            return None
+        base = self.base_url
+        if not base:
+            jlog(logger, level="ERROR", event="chroma_collection_missing_base")
+            return None
+        async with self._lock:
+            cached = self._collection_cache.get(name)
+            if cached:
+                return cached
+            collection_id = await self._create_collection(base, name)
+            if collection_id:
+                self._collection_cache[name] = collection_id
+                return collection_id
+            collection_id = await self._lookup_collection(base, name)
+            if collection_id:
+                self._collection_cache[name] = collection_id
+                return collection_id
+            return None
+
+    async def _create_collection(self, base: str, name: str) -> Optional[str]:
+        url = f"{base}/api/v1/collections"
+        payload = {"name": name}
+        try:
+            resp = await self._client.post(url, json=payload, timeout=30)
+            if resp.status_code in (200, 201):
+                data = resp.json()
+                collection = data.get("collection") or data
+                collection_id = collection.get("id") or collection.get("collection_id")
+                if collection_id:
+                    jlog(
+                        logger,
+                        event="chroma_collection_created",
+                        name=name,
+                        collection_id=collection_id,
+                    )
+                    return str(collection_id)
+            elif resp.status_code == 409:
+                jlog(logger, event="chroma_collection_exists", name=name)
+            else:
+                jlog(
+                    logger,
+                    level="ERROR",
+                    event="chroma_collection_create_failed",
+                    name=name,
+                    status=resp.status_code,
+                    body=resp.text,
+                )
+        except Exception as exc:  # pragma: no cover - network guard
+            jlog(
+                logger,
+                level="ERROR",
+                event="chroma_collection_create_error",
+                name=name,
+                error=str(exc),
+            )
+        return None
+
+    async def _lookup_collection(self, base: str, name: str) -> Optional[str]:
+        url = f"{base}/api/v1/collections"
+        try:
+            resp = await self._client.get(url, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            collections = data.get("collections")
+            if isinstance(collections, list):
+                for item in collections:
+                    if isinstance(item, dict) and item.get("name") == name:
+                        collection_id = item.get("id") or item.get("collection_id")
+                        if collection_id:
+                            jlog(
+                                logger,
+                                event="chroma_collection_found",
+                                name=name,
+                                collection_id=collection_id,
+                            )
+                            return str(collection_id)
+            jlog(logger, level="WARN", event="chroma_collection_lookup_miss", name=name)
+        except Exception as exc:  # pragma: no cover - network guard
+            jlog(
+                logger,
+                level="ERROR",
+                event="chroma_collection_lookup_error",
+                name=name,
+                error=str(exc),
+            )
+        return None
+
+    async def upsert(
+        self,
+        collection_id: str,
+        *,
+        ids: Sequence[str],
+        documents: Sequence[str],
+        metadatas: Sequence[dict],
+        embeddings: Optional[Sequence[Sequence[float]]] = None,
+    ) -> bool:
+        base = self.base_url
+        if not base:
+            jlog(logger, level="ERROR", event="chroma_upsert_missing_base")
+            return False
+        if not collection_id:
+            jlog(logger, level="ERROR", event="chroma_upsert_missing_collection")
+            return False
+        url = f"{base}/api/v1/collections/{collection_id}/add"
+        payload: Dict[str, object] = {
+            "ids": list(ids),
+            "documents": list(documents),
+            "metadatas": list(metadatas),
+        }
+        if embeddings is not None:
+            payload["embeddings"] = [list(vec) for vec in embeddings]
+        attempt = 0
+        item_count = len(ids)
+        while attempt < 3:
+            attempt += 1
+            try:
+                resp = await self._client.post(url, json=payload, timeout=60)
+                resp.raise_for_status()
+                jlog(
+                    logger,
+                    event="chroma_upsert_ok",
+                    collection_id=collection_id,
+                    count=item_count,
+                )
+                return True
+            except httpx.HTTPStatusError as exc:
+                jlog(
+                    logger,
+                    level="ERROR",
+                    event="chroma_upsert_http_error",
+                    collection_id=collection_id,
+                    status=exc.response.status_code,
+                    body=exc.response.text,
+                )
+                return False
+            except Exception as exc:  # pragma: no cover - network guard
+                jlog(
+                    logger,
+                    level="WARN",
+                    event="chroma_upsert_retry",
+                    attempt=attempt,
+                    collection_id=collection_id,
+                    error=str(exc),
+                )
+                await asyncio.sleep(min(2 ** attempt, 5))
+        jlog(logger, level="ERROR", event="chroma_upsert_exhausted", collection_id=collection_id)
+        return False

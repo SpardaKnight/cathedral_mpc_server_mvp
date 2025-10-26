@@ -162,19 +162,22 @@ class SessionManager:
 
 CURRENT_OPTIONS = load_options_from_disk()
 LM_HOSTS: Dict[str, str] = _normalize_lm_hosts(CURRENT_OPTIONS.get("lm_hosts"))
-CHROMA_MODE: str = CURRENT_OPTIONS.get("chroma_mode", "http")
+CHROMA_MODE: str = "http"
 CHROMA_URL: str = CURRENT_OPTIONS.get("chroma_url", "http://127.0.0.1:8000")
-PERSIST_DIR: str = CURRENT_OPTIONS.get("chroma_persist_dir", "/data/chroma")
 COLLECTION_NAME: str = CURRENT_OPTIONS.get("collection_name", "cathedral")
 ALLOWED_DOMAINS: List[str] = CURRENT_OPTIONS.get(
     "allowed_domains", ["light", "switch", "scene"]
 )
 TEMP: float = float(CURRENT_OPTIONS.get("temperature", 0.7))
 TOP_P: float = float(CURRENT_OPTIONS.get("top_p", 0.9))
-UPSERTS_ENABLED: bool = bool(CURRENT_OPTIONS.get("upserts_enabled", True))
+AUTO_CONFIG_REQUESTED: bool = bool(CURRENT_OPTIONS.get("auto_config", True))
+UPSERTS_REQUESTED: bool = bool(CURRENT_OPTIONS.get("upserts_enabled", True))
+AUTO_CONFIG_ACTIVE: bool = False
+UPSERTS_ACTIVE: bool = False
 
 HOST_POOL: Optional[HostPool] = HostPool(LM_HOSTS)
 SESSION_MANAGER = SessionManager()
+BOOTSTRAP_EVENT = asyncio.Event()
 
 PRUNE_INTERVAL_SECONDS = 15 * 60
 SESSION_TTL_MINUTES = 120
@@ -202,24 +205,19 @@ async def _session_prune_loop() -> None:
             )
         await asyncio.sleep(PRUNE_INTERVAL_SECONDS)
 
-chroma = ChromaClient(
-    ChromaConfig(
-        mode=CHROMA_MODE,
-        url=CHROMA_URL,
-        collection_name=COLLECTION_NAME,
-        persist_dir=PERSIST_DIR,
-    )
-)
+CHROMA_CONFIG = ChromaConfig(url=CHROMA_URL, collection_name=COLLECTION_NAME)
+CHROMA_CLIENT: Optional[ChromaClient] = None
 tb = ToolBridge(ALLOWED_DOMAINS)
-set_server(MPCServer(toolbridge=tb, chroma=chroma))
 
 
 async def reload_clients_from_options(
     options_override: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     global CURRENT_OPTIONS
-    global LM_HOSTS, CHROMA_MODE, CHROMA_URL, PERSIST_DIR, COLLECTION_NAME
-    global ALLOWED_DOMAINS, TEMP, TOP_P, UPSERTS_ENABLED, chroma, HOST_POOL
+    global LM_HOSTS, CHROMA_MODE, CHROMA_URL, COLLECTION_NAME
+    global ALLOWED_DOMAINS, TEMP, TOP_P
+    global AUTO_CONFIG_REQUESTED, UPSERTS_REQUESTED, AUTO_CONFIG_ACTIVE, UPSERTS_ACTIVE
+    global CHROMA_CONFIG, CHROMA_CLIENT, HOST_POOL
 
     options = (
         options_override if options_override is not None else load_options_from_disk()
@@ -227,39 +225,45 @@ async def reload_clients_from_options(
     CURRENT_OPTIONS = options
 
     LM_HOSTS = _normalize_lm_hosts(options.get("lm_hosts", LM_HOSTS))
-    CHROMA_MODE = options.get("chroma_mode", CHROMA_MODE)
+    requested_mode = str(options.get("chroma_mode", CHROMA_MODE)).lower()
+    if requested_mode != "http":
+        jlog(
+            logger,
+            level="WARN",
+            event="chroma_mode_forced_http",
+            requested=requested_mode,
+        )
+    CHROMA_MODE = "http"
     CHROMA_URL = options.get("chroma_url", CHROMA_URL)
-    PERSIST_DIR = options.get("chroma_persist_dir", PERSIST_DIR)
     COLLECTION_NAME = options.get("collection_name", COLLECTION_NAME)
     ALLOWED_DOMAINS = options.get("allowed_domains", ALLOWED_DOMAINS)
     TEMP = float(options.get("temperature", TEMP))
     TOP_P = float(options.get("top_p", TOP_P))
-    UPSERTS_ENABLED = bool(options.get("upserts_enabled", UPSERTS_ENABLED))
+    AUTO_CONFIG_REQUESTED = bool(options.get("auto_config", AUTO_CONFIG_REQUESTED))
+    UPSERTS_REQUESTED = bool(options.get("upserts_enabled", UPSERTS_REQUESTED))
 
     tb.allowed_domains = set(ALLOWED_DOMAINS)
 
     HOST_POOL = HostPool(LM_HOSTS)
 
-    new_chroma = ChromaClient(
-        ChromaConfig(
-            mode=CHROMA_MODE,
-            url=CHROMA_URL,
-            collection_name=COLLECTION_NAME,
-            persist_dir=PERSIST_DIR,
-        )
-    )
-    chroma = new_chroma
+    CHROMA_CONFIG = ChromaConfig(url=CHROMA_URL, collection_name=COLLECTION_NAME)
+    if CHROMA_CLIENT is not None:
+        CHROMA_CLIENT.update_config(CHROMA_CONFIG)
+
     try:
         server = get_server()
-        server.chroma = chroma
+        server.update_chroma(CHROMA_CLIENT)
+        server.update_collection_name_provider(lambda: COLLECTION_NAME)
     except RuntimeError:
-        set_server(MPCServer(toolbridge=tb, chroma=chroma))
+        pass
 
     client = APP_CLIENTS.get("lm")
     if client:
         await HOST_POOL.refresh(client)
     else:
         jlog(logger, level="WARN", event="hostpool_refresh_deferred")
+
+    await update_bootstrap_state(force_refresh=False)
 
     logger.info("=== Cathedral Orchestrator reload ===")
     jlog(
@@ -268,8 +272,77 @@ async def reload_clients_from_options(
         hosts=list(LM_HOSTS.values()),
         chroma_mode=CHROMA_MODE,
         chroma_url=CHROMA_URL,
+        auto_config_requested=AUTO_CONFIG_REQUESTED,
+        upserts_requested=UPSERTS_REQUESTED,
     )
     return options
+
+
+def is_bootstrap_ready() -> bool:
+    return BOOTSTRAP_EVENT.is_set()
+
+
+def auto_config_enabled() -> bool:
+    return AUTO_CONFIG_ACTIVE
+
+
+def upserts_enabled() -> bool:
+    return UPSERTS_ACTIVE
+
+
+def get_collection_name() -> str:
+    return COLLECTION_NAME
+
+
+async def _catalog_provider() -> Dict[str, List[str]]:
+    if HOST_POOL is None:
+        return {}
+    return await HOST_POOL.get_catalog()
+
+
+async def update_bootstrap_state(
+    force_refresh: bool = False,
+    *,
+    catalog_override: Optional[Dict[str, List[str]]] = None,
+    chroma_ready_override: Optional[bool] = None,
+) -> None:
+    global AUTO_CONFIG_ACTIVE, UPSERTS_ACTIVE
+
+    client = APP_CLIENTS.get("lm")
+    catalog: Dict[str, List[str]] = {} if catalog_override is None else catalog_override
+    if catalog_override is None and HOST_POOL is not None:
+        if force_refresh and client:
+            await HOST_POOL.refresh(client)
+        catalog = await HOST_POOL.get_catalog()
+    lm_ready = any(models for models in catalog.values())
+
+    if chroma_ready_override is not None:
+        chroma_ready = chroma_ready_override
+    else:
+        if CHROMA_URL and CHROMA_CLIENT is not None:
+            chroma_ready = await CHROMA_CLIENT.health_ok()
+        elif CHROMA_URL:
+            chroma_ready = False
+        else:
+            chroma_ready = True
+
+    ready = lm_ready and chroma_ready
+    if ready:
+        BOOTSTRAP_EVENT.set()
+    else:
+        BOOTSTRAP_EVENT.clear()
+
+    AUTO_CONFIG_ACTIVE = ready and AUTO_CONFIG_REQUESTED
+    UPSERTS_ACTIVE = ready and UPSERTS_REQUESTED
+    jlog(
+        logger,
+        event="bootstrap_state",
+        ready=ready,
+        lm_ready=lm_ready,
+        chroma_ready=chroma_ready,
+        auto_config_active=AUTO_CONFIG_ACTIVE,
+        upserts_active=UPSERTS_ACTIVE,
+    )
 
 
 @asynccontextmanager
@@ -282,9 +355,22 @@ async def lifespan(app: FastAPI):
         timeout=30,
         limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
     )
+    global CHROMA_CLIENT
+    CHROMA_CLIENT = ChromaClient(APP_CLIENTS["chroma"], CHROMA_CONFIG)
+    server = MPCServer(
+        toolbridge=tb,
+        chroma=CHROMA_CLIENT,
+        catalog_provider=_catalog_provider,
+        readiness_probe=is_bootstrap_ready,
+        collection_name_provider=get_collection_name,
+        upsert_allowed=upserts_enabled,
+        auto_config_allowed=auto_config_enabled,
+    )
+    set_server(server)
     prune_task = asyncio.create_task(_session_prune_loop())
     try:
         await reload_clients_from_options(dict(CURRENT_OPTIONS))
+        await update_bootstrap_state(force_refresh=True)
         yield
     finally:
         prune_task.cancel()
@@ -327,20 +413,35 @@ async def health():
         await HOST_POOL.refresh(client)
         catalog = await HOST_POOL.get_catalog()
 
-    results = list(catalog.items())
-    chroma_ok = chroma.health()
+    lm_counts = {base: len(models) for base, models in catalog.items()}
+    lm_ready = any(count > 0 for count in lm_counts.values())
+    chroma_ok = True
+    if CHROMA_URL:
+        chroma_ok = bool(CHROMA_CLIENT) and await CHROMA_CLIENT.health_ok()
+
+    await update_bootstrap_state(
+        force_refresh=False,
+        catalog_override=catalog,
+        chroma_ready_override=chroma_ok,
+    )
+    ready = lm_ready and chroma_ok
+    status = 200 if ready else 503
+
     payload = {
-        "ok": True,
-        "lm_hosts": {base: len(models) for base, models in results},
+        "ok": ready,
+        "lm_hosts": lm_counts,
         "chroma": {"ok": chroma_ok},
     }
+    if not ready:
+        payload["detail"] = "bootstrap_pending"
     jlog(
         logger,
         event="health_status",
-        host_count=len(results),
+        host_count=len(lm_counts),
         chroma_ok=chroma_ok,
+        ready=ready,
     )
-    return JSONResponse(payload)
+    return JSONResponse(payload, status_code=status)
 
 
 @app.get("/api/status")
@@ -351,15 +452,20 @@ async def api_status():
     if client and not (await HOST_POOL.get_catalog()):
         await HOST_POOL.refresh(client)
     catalog = await HOST_POOL.get_catalog()
+    await update_bootstrap_state(force_refresh=False, catalog_override=catalog)
     sessions_active = await SESSION_MANAGER.list_active()
     options_snapshot = dict(CURRENT_OPTIONS)
     response = {
         "ok": True,
         "updated_at": datetime.utcnow().isoformat() + "Z",
         "sessions_active": sessions_active,
-        "auto_config": bool(options_snapshot.get("auto_config", True)),
+        "auto_config": AUTO_CONFIG_REQUESTED,
+        "auto_config_active": AUTO_CONFIG_ACTIVE,
         "auto_discovery": bool(options_snapshot.get("auto_discovery", False)),
         "lock_hosts": bool(options_snapshot.get("lock_hosts", False)),
+        "upserts_enabled": UPSERTS_REQUESTED,
+        "upserts_active": UPSERTS_ACTIVE,
+        "bootstrap_ready": BOOTSTRAP_EVENT.is_set(),
         "hosts": catalog,
     }
     jlog(
@@ -367,6 +473,7 @@ async def api_status():
         event="api_status",
         sessions=response["sessions_active"],
         host_count=len(catalog),
+        bootstrap_ready=response["bootstrap_ready"],
     )
     return JSONResponse(response)
 
@@ -531,22 +638,51 @@ async def embeddings(request: Request):
     response.raise_for_status()
     data = response.json()
     try:
-        if UPSERTS_ENABLED:
-            payload_items = data.get("data") or []
-            vectors = [item.get("embedding") for item in payload_items]
-            texts = inputs_list[: len(vectors)]
-            if len(texts) < len(vectors):
-                texts.extend(["" for _ in range(len(vectors) - len(texts))])
-            ids = [str(uuid.uuid4()) for _ in vectors]
-            meta = body.get("metadata") or {}
-            metadatas = [meta for _ in vectors]
-            chroma_res = chroma.upsert(
-                ids=ids,
-                embeddings=vectors,
-                documents=texts,
-                metadatas=metadatas,
-            )
-            jlog(logger, event="chroma_upsert", result=chroma_res, count=len(vectors))
+        if UPSERTS_ACTIVE and CHROMA_CLIENT is not None:
+            payload_items_raw = data.get("data")
+            payload_items: List[Any]
+            if isinstance(payload_items_raw, list):
+                payload_items = payload_items_raw
+            else:
+                payload_items = []
+            vectors: List[List[float]] = []
+            for item in payload_items:
+                if not isinstance(item, dict):
+                    continue
+                embedding = item.get("embedding")
+                if isinstance(embedding, list):
+                    vectors.append([float(v) for v in embedding])
+            if not vectors:
+                jlog(logger, event="chroma_upsert_skipped", reason="no_vectors")
+            else:
+                texts = inputs_list[: len(vectors)]
+                if len(texts) < len(vectors):
+                    texts.extend(["" for _ in range(len(vectors) - len(texts))])
+                ids = [str(uuid.uuid4()) for _ in vectors]
+                meta = body.get("metadata") or {}
+                metadatas = [meta for _ in vectors]
+                collection_id = await CHROMA_CLIENT.ensure_collection(COLLECTION_NAME)
+                if collection_id:
+                    ok = await CHROMA_CLIENT.upsert(
+                        collection_id,
+                        ids=ids,
+                        documents=texts,
+                        metadatas=metadatas,
+                        embeddings=vectors,
+                    )
+                    jlog(
+                        logger,
+                        event="chroma_upsert",
+                        result=ok,
+                        count=len(vectors),
+                    )
+                else:
+                    jlog(
+                        logger,
+                        level="ERROR",
+                        event="chroma_collection_missing",
+                        collection=COLLECTION_NAME,
+                    )
     except Exception as exc:  # pragma: no cover - chroma guard
         jlog(logger, level="ERROR", event="chroma_upsert_fail", error=str(exc))
     return JSONResponse(data, status_code=response.status_code)

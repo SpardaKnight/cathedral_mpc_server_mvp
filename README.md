@@ -1,6 +1,6 @@
 # Cathedral Orchestrator (Home Assistant Add-on)
 
-Cathedral Orchestrator bridges Home Assistant with Cathedral’s OpenAI-compatible relay and MPC tool stack. The add-on proxies Chat Completions and Embeddings to operator-supplied LM Studio hosts, exposes `/mcp` for Cathedral tools, and keeps vector state in Chroma (HTTP or embedded). All writes to `/data/sessions.db` and `/data/chroma` follow the single-writer rule.
+Cathedral Orchestrator bridges Home Assistant with Cathedral’s OpenAI-compatible relay and MPC tool stack. The add-on proxies Chat Completions and Embeddings to operator-supplied LM Studio hosts, exposes `/mcp` for Cathedral tools, and stores vectors in an external Chroma HTTP service on the LAN. All writes to `/data/sessions.db` follow the single-writer rule.
 
 - **MegaDoc**: [docs/MegaDoc.md](docs/MegaDoc.md) – complete architecture, schema, and operator guidance.
 - **Smoke Build**: [docs/operations/smoke-build.md](docs/operations/smoke-build.md) – the only sanctioned validation path.
@@ -18,9 +18,9 @@ Cathedral Orchestrator bridges Home Assistant with Cathedral’s OpenAI-compatib
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `lm_hosts` | list(url) | `[]` | Base URLs for LM Studio/OpenAI-compatible hosts. Trailing `/v1` is removed automatically. |
-| `chroma_mode` | `"http"` or `"embedded"` | `"http"` | Select remote Chroma or embedded persistence. |
+| `chroma_mode` | `"http"` | `"http"` | HTTP mode only. Embedded persistence is no longer bundled in the add-on. |
 | `chroma_url` | str? | `"http://127.0.0.1:8000"` | Required when `chroma_mode` is `"http"`. |
-| `chroma_persist_dir` | str? | `"/data/chroma"` | Required when `chroma_mode` is `"embedded"`. |
+| `chroma_persist_dir` | str? | `"/data/chroma"` | Legacy option retained for compatibility. Ignored in HTTP-only deployments. |
 | `collection_name` | str | `"cathedral"` | Chroma collection name. |
 | `allowed_domains` | list(str) | `["light","switch","scene"]` | Home Assistant domains exposed to Cathedral tools. |
 | `temperature` | float | `0.7` | Default sampling temperature forwarded to LM hosts. |
@@ -44,7 +44,6 @@ lm_hosts:
   - "http://192.168.1.233:1234"
 chroma_mode: "http"
 chroma_url: "http://192.168.1.42:8000"
-chroma_persist_dir: "/data/chroma"
 collection_name: "cathedral"
 allowed_domains:
   - light
