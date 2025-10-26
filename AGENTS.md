@@ -85,3 +85,62 @@ Documentation anchors for agents:
 - S6 v3 base image note - init: false and PID 1 enforcement: <https://developers.home-assistant.io/blog/2022/05/12/s6-overlay-base-images>
 - Add-on tutorial - init: false and Supervisor lifecycle: <https://developers.home-assistant.io/docs/add-ons/tutorial>
 - Add-on configuration reference - init option: <https://developers.home-assistant.io/docs/add-ons/configuration>
+
+## Supervisor Sync and s6 v3 Compliance (Hard Rules)
+
+1) `config.yaml` is the authoritative add-on manifest. Every change to any of these requires a version bump:
+   - `cathedral_orchestrator/rootfs/**`
+   - `cathedral_orchestrator/Dockerfile`
+   - `cathedral_orchestrator/orchestrator/**`
+   The `version` in `config.yaml` must match the top entry in `cathedral_orchestrator/CHANGELOG.md`.
+
+2) s6 v3 invariants:
+   - `init: false` is required in `config.yaml`.
+   - Do not enable `host_pid`. It is incompatible with s6 v3.
+   - Service chain is fixed:
+     - `rootfs/etc/services.d/cathedral/run`:
+       ```
+       #!/command/execlineb -P
+       with-contenv
+       exec /opt/app/start.sh
+       ```
+     - `rootfs/etc/services.d/cathedral/finish`:
+       ```
+       #!/command/execlineb -P
+       with-contenv
+       /run/s6/basedir/bin/halt
+       ```
+     - `rootfs/opt/app/start.sh` ends with:
+       ```
+       cd /opt/app
+       export PYTHONPATH="/opt/app:${PYTHONPATH:-}"
+       exec uvicorn --app-dir /opt/app orchestrator.main:app --host 0.0.0.0 --port 8001
+       ```
+
+3) Dockerfile baseline:
+   - Must start with:
+     ```
+     ARG BUILD_FROM
+     FROM $BUILD_FROM
+     ```
+   - No `ENTRYPOINT` and no `CMD`. The base image provides `/init` (s6 PID 1).
+
+4) Manifest hygiene:
+   - Never have more than one file named `config.yaml` in the repository. The Supervisor recursively searches for that filename.
+   - If `image:` is used, the tag published must match `version`.
+
+5) Line endings and exec:
+   - `.gitattributes` must contain:
+     ```
+     *.sh text eol=lf
+     rootfs/etc/services.d/** text eol=lf
+     ```
+   - Keep exec bits tracked in git for `run`, `finish`, and `start.sh`. Dockerfile may keep chmod as a belt-and-braces layer.
+
+6) Release steps:
+   - Bump `config.yaml:version`.
+   - Add a CHANGELOG entry with the same version.
+   - Add a patch note under `docs/patches/`.
+   - After merge, operators use Add-on Store → “Reload” and then “Rebuild”.
+
+Any PR that changes runtime files without updating the manifest version or violating any rule above must be rejected.
