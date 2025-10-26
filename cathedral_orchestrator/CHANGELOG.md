@@ -1,5 +1,8 @@
 # Cathedral Orchestrator – Changelog
 
+## [1.1.10]
+- Bump Supervisor manifest metadata to restore update detection and sync JSON mirror.
+
 ## [1.1.9]
 - Fix Uvicorn import path by switching to `--app-dir /opt/app` and exporting `PYTHONPATH` before launch.
 

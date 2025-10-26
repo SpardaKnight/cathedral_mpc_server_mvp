@@ -2,7 +2,7 @@
   "name": "Cathedral Orchestrator",
   "slug": "cathedral_orchestrator",
   "description": "OpenAI-compatible relay + MPC server for Cathedral",
-  "version": "1.1.8",
+  "version": "1.1.10",
   "arch": [
     "amd64"
   ],
