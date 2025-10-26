@@ -589,7 +589,7 @@ async def api_set_options(request: Request):
 
 
 @app.get("/v1/models")
-async def list_models():
+async def models_v1(_request: Request):
     client = APP_CLIENTS.get("lm")
     if not client:
         raise HTTPException(status_code=503, detail="client not ready")
@@ -609,6 +609,11 @@ async def list_models():
                 }
                 union.append(merged)
     return JSONResponse({"object": "list", "data": union})
+
+
+@app.get("/api/v0/models")
+async def models_v0_alias(request: Request):
+    return await models_v1(request)
 
 
 async def _route_for_model(model: str) -> str:
@@ -637,17 +642,16 @@ async def chat_completions(request: Request):
     client = APP_CLIENTS.get("lm")
     if not client:
         raise HTTPException(status_code=503, detail="client not ready")
+    req_bytes = json.dumps(body).encode("utf-8")
     if stream:
-        timeout = httpx.Timeout(connect=30, write=30, read=None, pool=None)
         async with client.stream(
-            "POST", url, headers=headers, json=body, timeout=timeout
+            "POST",
+            url,
+            headers=headers,
+            content=req_bytes,
+            timeout=None,
         ) as upstream:
-
-            async def gen():
-                async for chunk in upstream.aiter_raw():
-                    yield chunk
-
-            return await sse_proxy(gen())
+            return await sse_proxy(upstream.aiter_bytes())
     response = await client.post(url, headers=headers, json=body)
     return JSONResponse(response.json(), status_code=response.status_code)
 

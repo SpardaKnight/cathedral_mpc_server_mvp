@@ -1,5 +1,9 @@
 # Cathedral Orchestrator – Changelog
 
+## [1.1.13]
+- Fix streaming relay to treat `httpx.StreamClosed` as a clean EOF and always emit the SSE `data: [DONE]` trailer.
+- Add `/api/v0/models` alias for legacy clients probing the deprecated path.
+
 ## [1.1.12]
 - Implement heartbeat-first Chroma readiness with v2→v1→docs fallback and redirect following.
 - Make the session TTL prune scheduler idempotent so reloads spawn fresh threads without crashes.
