@@ -43,7 +43,7 @@ Full schema guidance lives in [docs/schemas/ADDON_OPTIONS.md](schemas/ADDON_OPTI
 * **Embedded mode**: the add-on runs Chroma in-process, persisting data under `/data/chroma`. Ensure Supervisor mounts enough disk. The health endpoint inspects the embedded client and reports readiness without issuing network calls.
 
 ## LM Studio Contract
-* Provide base URLs **without** `/v1` in the add-on options. The orchestrator appends `/v1/...` when routing embeddings and model discovery requests; chat completions are pinned to the dedicated LM Studio relay at `http://192.168.1.175:1234/v1/chat/completions`.
+* Provide base URLs **without** `/v1` in the add-on options. The orchestrator appends `/v1/...` when routing embeddings and model discovery requests; chat completions are pinned to the dedicated LM Studio relay at `http://192.168.1.175:1234/v1/chat/completions` using an `async with client.stream(...)` pass-through so Server-Sent Events reach AnythingLLM unchanged.
 * LM Studio’s embeddings endpoint expects GPU acceleration on Windows; specify hosts that expose `/v1/embeddings` or disable embeddings for read-only flows.
 * Multiple hosts are pooled; the orchestrator selects the first host that advertises the requested `model` from `/v1/models`.
 
