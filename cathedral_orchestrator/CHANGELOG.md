@@ -1,5 +1,16 @@
 # Cathedral Orchestrator – Changelog
 
+## 1.1.1 – 2025-10-26
+- Adjust `/api/status` to expose host catalogs as lists of model identifiers per v3.1.
+- Harden `/health` readiness gating to require an LM client and configured hosts before reporting OK.
+- Default `auto_config` to `true` and sync manifests/schema/docs.
+
+## 1.1.0 – 2025-10-26
+- Implemented v3.1 `/api/status` payload with session counts, host catalog, and option flags.
+- Added Supervisor option reload pipeline with HostPool/Chroma rebuild and persisted lock toggles.
+- Bumped defaults and manifests for new auto-config and lock fields.
+
+
 ## 0.1.3 – 2025-10-25
 - Fix MPC WebSocket path to resolve to `/mcp` exactly by adjusting router decorator to `/` with router prefix.
 - Bind MPC WebSocket on port 5005 alongside HTTP relay on 8001.

@@ -13,6 +13,13 @@ The options below are authoritative for `cathedral_orchestrator/config.yaml` and
 | `temperature` | float | Yes | `0.7` | Default sampling temperature applied to LM Studio compatible hosts. | `0.6` |
 | `top_p` | float | Yes | `0.9` | Default nucleus sampling value passed through to upstream models. | `0.85` |
 | `upserts_enabled` | bool | Yes | `true` | Enables real-time embedding upserts to Chroma. Disable to operate in read-only replay mode. | `false` |
+| `auto_config` | bool | Yes | `true` | Enables Supervisor-managed bootstrap for LM hosts and reflects in `/api/status`. | `true` |
+| `auto_discovery` | bool | Yes | `false` | Reserved toggle for LAN discovery of LM hosts. Currently no-op but persisted for parity. | `false` |
+| `lock_hosts` | bool | Yes | `false` | Prevents remote config writes from altering `lm_hosts`. | `false` |
+| `lock_LMSTUDIO_BASE_PATH` | bool | Yes | `false` | Locks MPC client override for LM Studio base path. | `false` |
+| `lock_EMBEDDING_BASE_PATH` | bool | Yes | `false` | Locks MPC client override for embedding base path. | `false` |
+| `lock_CHROMA_URL` | bool | Yes | `false` | Locks MPC client override for Chroma URL. | `false` |
+| `lock_VECTOR_DB` | bool | Yes | `false` | Locks MPC client override for vector database selection. | `false` |
 
 ## Hot-apply example payload
 
@@ -26,7 +33,14 @@ The options below are authoritative for `cathedral_orchestrator/config.yaml` and
   "allowed_domains": ["light", "switch", "scene"],
   "temperature": 0.7,
   "top_p": 0.9,
-  "upserts_enabled": true
+  "upserts_enabled": true,
+  "auto_config": true,
+  "auto_discovery": false,
+  "lock_hosts": false,
+  "lock_LMSTUDIO_BASE_PATH": false,
+  "lock_EMBEDDING_BASE_PATH": false,
+  "lock_CHROMA_URL": false,
+  "lock_VECTOR_DB": false
 }
 ```
 

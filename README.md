@@ -25,9 +25,18 @@ Cathedral Orchestrator bridges Home Assistant with Cathedral’s OpenAI-compatib
 | `allowed_domains` | list(str) | `["light","switch","scene"]` | Home Assistant domains exposed to Cathedral tools. |
 | `temperature` | float | `0.7` | Default sampling temperature forwarded to LM hosts. |
 | `top_p` | float | `0.9` | Default nucleus sampling value. |
-| `upserts_enabled` | bool | `true` | Enables vector upserts; disable for read-only mode.
+| `upserts_enabled` | bool | `true` | Enables vector upserts; disable for read-only mode. |
+| `auto_config` | bool | `true` | Enable Supervisor-driven host/bootstrap configuration surfaced in `/api/status`. |
+| `auto_discovery` | bool | `false` | Reserved toggle for LAN discovery of compatible LM hosts. |
+| `lock_hosts` | bool | `false` | Prevents remote config writers from mutating `lm_hosts`. |
+| `lock_LMSTUDIO_BASE_PATH` | bool | `false` | Locks MPC client overrides for LM Studio base path. |
+| `lock_EMBEDDING_BASE_PATH` | bool | `false` | Locks MPC client overrides for embedding host base path. |
+| `lock_CHROMA_URL` | bool | `false` | Locks MPC client overrides for the Chroma URL. |
+| `lock_VECTOR_DB` | bool | `false` | Locks MPC client vector database selection.
 
 Full schema and JSON example: [docs/schemas/ADDON_OPTIONS.md](docs/schemas/ADDON_OPTIONS.md).
+
+`GET /api/status` exposes a **Model Catalog** keyed by host URL, where each value is a list of model identifiers available from that host. Client integrations must not expect additional metadata in the catalog payload.
 
 Example `options` block:
 ```yaml

@@ -1,5 +1,5 @@
 from starlette.responses import StreamingResponse
-import asyncio
+
 
 # SSE helper to forward upstream stream as-is, adding heartbeats and [DONE] terminator if needed.
 async def sse_proxy(iter_bytes, content_type: str = "text/event-stream"):
@@ -25,4 +25,5 @@ async def sse_proxy(iter_bytes, content_type: str = "text/event-stream"):
             if not sent_any:
                 yield "data: {}\n\n"
             yield "data: [DONE]\n\n"
+
     return StreamingResponse(event_iter(), media_type=content_type)
