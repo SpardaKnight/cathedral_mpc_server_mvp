@@ -1,5 +1,8 @@
 # Cathedral Orchestrator – Changelog
 
+## [1.1.6]
+- Refactored add-on startup: removed run.sh, resolved s6-overlay PID 1 conflict, moved all launch logic to service script.
+
 ## 1.1.5 – 2025-10-27
 - Externalized vector persistence to an HTTP Chroma service and removed chromadb from the add-on image.
 - Added safe bootstrap gating that requires healthy LM hosts and Chroma before enabling auto-config or vector upserts.
