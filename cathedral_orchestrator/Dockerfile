@@ -21,9 +21,13 @@ RUN python3 -m venv /opt/venv && \
 WORKDIR /opt/app
 
 # Copy orchestrator and entrypoint
-COPY orchestrator/ /opt/app/orchestrator/
+COPY orchestrator /opt/app/orchestrator
 COPY run.sh /opt/app/run.sh
 RUN chmod +x /opt/app/run.sh
+
+# Copy s6 service definitions
+COPY rootfs/ /
+RUN chmod +x /etc/services.d/cathedral/run /etc/services.d/cathedral/finish
 
 # Pinned runtime deps
 RUN /opt/venv/bin/pip install --no-cache-dir \
@@ -39,4 +43,3 @@ RUN /opt/venv/bin/pip install --no-cache-dir \
       chromadb==0.5.12
 
 EXPOSE 8001 5005
-CMD ["/opt/app/run.sh"]

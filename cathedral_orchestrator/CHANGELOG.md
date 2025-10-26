@@ -1,5 +1,8 @@
 # Cathedral Orchestrator – Changelog
 
+## 1.1.4 – 2025-10-26
+- Run the add-on under s6 v3 with `/init` as PID 1, moving startup into `/etc/services.d` and declaring `init: false`. No functional changes.
+
 ## 1.1.3 – 2025-10-26
 - Ensure session update helpers use workspace-aware keys for mutation safety.
 - No surface API or configuration changes.
