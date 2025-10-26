@@ -1,0 +1,3 @@
+- Restore `/v1/chat/completions` to a generic LM host relay that streams through the same host catalog used by `/api/v0/models` instead of a hardcoded LAN endpoint.
+- Forward only the required JSON + SSE headers while preserving optional `Authorization`, and surface upstream transport failures as structured 502 errors.
+- Bump add-on manifests to release the fix and update specs/MegaDoc to describe the hostpool-driven relay behavior.
