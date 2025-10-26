@@ -1,5 +1,8 @@
 # Cathedral Orchestrator – Changelog
 
+## [1.1.11]
+- Add Supervisor Sync + s6 v3 hard rules to AGENTS.md and enforce them with static pytest guards.
+
 ## [1.1.10]
 - Bump Supervisor manifest metadata to restore update detection and sync JSON mirror.
 
