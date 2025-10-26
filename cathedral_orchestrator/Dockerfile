@@ -28,6 +28,6 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # No chromadb here. Chroma is external over HTTP.
 
 COPY rootfs/ /
-RUN chmod +x /etc/services.d/cathedral/run /etc/services.d/cathedral/finish
+RUN chmod +x /etc/services.d/cathedral/run /etc/services.d/cathedral/finish /opt/app/start.sh
 
 EXPOSE 8001 5005
