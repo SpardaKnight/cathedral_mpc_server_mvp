@@ -153,7 +153,10 @@ async def find_by_conversation(conversation_id: str) -> Optional[Dict[str, Any]]
 
 
 async def set_host(
-    workspace_id: str, thread_id: str, host_url: str, model_id: str
+    workspace_id: str,
+    thread_id: str,
+    host_url: Optional[str],
+    model_id: Optional[str],
 ) -> None:
     now = time.time()
     try:

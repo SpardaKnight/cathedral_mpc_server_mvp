@@ -19,28 +19,36 @@ repo root
 ```
 
 ## Runtime Surface
-* **HTTP 8001/tcp** – OpenAI-compatible REST endpoints: `/v1/models`, `/v1/chat/completions`, `/v1/embeddings`, plus `/api/options` for hot configuration and `/health` for readiness checks. Chat completions reuse the same LM host catalog as `/v1/models`, streaming from the first configured base URL.
+* **HTTP 8001/tcp** – OpenAI-compatible REST endpoints: `/v1/models`, `/v1/chat/completions`, `/v1/embeddings`, plus `/api/options`, `/api/status`, and `/health`. Chat completions now enforce `text/event-stream`, detect client disconnects, apply idle timeouts, and synthesize `data: [DONE]` frames when upstream stalls.
 * **WebSocket 5005/tcp** – MPC WebSocket server mounted under `/mcp`. Handles Cathedral tool flows and applies the single-writer constraint for automations.
 * **Supervisor APIs** – `/api/options` accepts JSON payloads to hot-apply configuration; `/api/status` surfaces current options for troubleshooting.
+
+`/api/status` merges all configured LM hosts into a single model catalog, reports per-host health, exposes LM/Chroma readiness, and tracks active session counts so operators can confirm routing and memory collection links at a glance.
 
 ## Options Schema (authoritative)
 | Option | Type | Required? | Default | Description | Example |
 | --- | --- | --- | --- | --- | --- |
 | `lm_hosts` | list(url) | Yes | `[]` | Ordered list of language model base URLs. Trailing `/v1` is stripped automatically. | `["http://192.168.1.233:1234"]` |
-| `chroma_mode` | str (`"http"\|"embedded"`) | Yes | `"http"` | Determines whether vectors are proxied to a remote Chroma HTTP server or stored in the embedded engine. | `"embedded"` |
-| `chroma_url` | str? | Conditional | `"http://127.0.0.1:8000"` | Remote Chroma endpoint used when `chroma_mode` is `"http"`. Ignored for embedded mode. | `"http://192.168.1.42:8000"` |
-| `chroma_persist_dir` | str? | Conditional | `"/data/chroma"` | Filesystem directory for embedded Chroma persistence. Required when `chroma_mode` is `"embedded"`. | `"/data/chroma"` |
+| `chroma_mode` | str (`"http"`) | Yes | `"http"` | HTTP-only mode. Non-HTTP values are coerced back to `"http"`. | `"http"` |
+| `chroma_url` | str? | Conditional | `"http://127.0.0.1:8000"` | Remote Chroma endpoint used when `chroma_mode` is `"http"`. | `"http://192.168.1.42:8000"` |
+| `chroma_persist_dir` | str? | Optional | `"/data/chroma"` | Legacy option retained for schema parity; ignored by the HTTP client. | `"/data/chroma"` |
 | `collection_name` | str | Yes | `"cathedral"` | Chroma collection that stores embeddings for the orchestrator. | `"cathedral"` |
 | `allowed_domains` | list(str) | Yes | `["light","switch","scene"]` | Home Assistant domains exposed to MPC tools. | `["light","switch","scene","media_player"]` |
 | `temperature` | float | Yes | `0.7` | Default sampling temperature applied to LM Studio compatible hosts. | `0.6` |
 | `top_p` | float | Yes | `0.9` | Default nucleus sampling value passed through to upstream models. | `0.85` |
 | `upserts_enabled` | bool | Yes | `true` | Enables real-time embedding upserts to Chroma. Disable to operate in read-only replay mode. | `false` |
+| `auto_config` | bool | Yes | `true` | Allows MPC auto-configuration to hot-apply LM/Chroma settings from AnythingLLM. | `true` |
+| `auto_discovery` | bool | Yes | `false` | Reserved toggle for LAN discovery of LM hosts. Currently no-op. | `false` |
+| `lock_hosts` | bool | Yes | `false` | Prevents remote updates from altering `lm_hosts`. | `false` |
+| `lock_LMSTUDIO_BASE_PATH` | bool | Yes | `false` | Blocks MPC auto-config from rewriting the LM Studio base path. | `false` |
+| `lock_EMBEDDING_BASE_PATH` | bool | Yes | `false` | Locks the embedding base path for remote config pushes. | `false` |
+| `lock_CHROMA_URL` | bool | Yes | `false` | Locks the Chroma URL for remote config pushes. | `false` |
+| `lock_VECTOR_DB` | bool | Yes | `false` | Locks vector database selection for remote config pushes. | `false` |
 
 Full schema guidance lives in [docs/schemas/ADDON_OPTIONS.md](schemas/ADDON_OPTIONS.md).
 
-## Chroma Modes
-* **HTTP mode** (default): the add-on forwards vector reads/writes to a remote Chroma deployment identified by `chroma_url`. `/health` reports the number of models discovered per LM host and whether the remote Chroma responded.
-* **Embedded mode**: the add-on runs Chroma in-process, persisting data under `/data/chroma`. Ensure Supervisor mounts enough disk. The health endpoint inspects the embedded client and reports readiness without issuing network calls.
+## Chroma Mode
+* **HTTP mode only**: vectors are proxied to the remote Chroma deployment identified by `chroma_url`. The orchestrator proactively creates the configured collection when options change or sessions bootstrap and records the collection ID alongside each MPC session.
 
 ## LM Studio Contract
 * Provide base URLs **without** `/v1` in the add-on options. The orchestrator appends `/v1/...` when routing embeddings and model discovery requests; chat completions stream through the first configured LM host using the same async pass-through so Server-Sent Events reach AnythingLLM unchanged.
@@ -48,7 +56,7 @@ Full schema guidance lives in [docs/schemas/ADDON_OPTIONS.md](schemas/ADDON_OPTI
 * Multiple hosts are pooled; the orchestrator selects the first host that advertises the requested `model` from `/v1/models`.
 
 ## Concurrency
-* Server-Sent Events use `read=None` in the HTTPX timeout to keep streams open until upstream completion. Keep-alive heartbeats prevent idle disconnects.
+* Server-Sent Events enforce `text/event-stream`, monitor client disconnects, and enforce a five-minute idle timeout. The relay injects `data: [DONE]` when upstreams terminate without sending the sentinel so clients do not hang.
 * LM HTTP clients are shared across requests with `max_connections=100` and `max_keepalive_connections=20` to balance concurrency and memory footprint.
 * Uvicorn runs with `uvloop` and `httptools` (provided by the add-on image) for efficient async dispatch. MPC WebSocket sessions share the same event loop, and SQLite writes rely on WAL mode to avoid blocking.
 
@@ -69,9 +77,9 @@ Full schema guidance lives in [docs/schemas/ADDON_OPTIONS.md](schemas/ADDON_OPTI
 * Supervisor builds images with `docker buildx build` under BuildKit. Operators can mirror the exact invocation (see [operations/smoke-build.md](operations/smoke-build.md)) to confirm the image constructs without running runtime tests.
 
 ## MCP
-* Implements MCP scopes `config.read` and `config.write` so Cathedral clients can fetch and persist Home Assistant tool settings.
-* MPC sessions are single-writer; the orchestrator enforces sequential command execution and streams updates via `/mcp` with SSE fallbacks.
-* Expect the server to be ready to apply writes immediately after `/health` returns `{"ok": true}`.
+* Implements MPC config scopes including `config.read` and `config.read.result`; the latter hot-applies unlocked LM/Chroma settings to `/api/options` when `auto_config` is enabled.
+* `resources.list` and `resources.health` now surface the merged model catalog and per-host health derived from `/api/status`.
+* MPC sessions remain single-writer but now record the assigned host, model ID, and Chroma collection metadata as part of the session bootstrap.
 
 ## Known Foot-guns
 * Early schema revisions accepted `lm_hosts` as a dict; ensure the current list-of-URL schema is used to avoid validation errors.

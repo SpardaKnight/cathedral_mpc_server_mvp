@@ -4,7 +4,7 @@ import json
 import os
 import time
 import uuid
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import httpx
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -67,6 +67,64 @@ class MPCServer:
         allowed = self._auto_config_allowed()
         jlog(logger, event="mpc_server_auto_config_state", allowed=allowed)
         return allowed
+
+    async def _assign_session_host(
+        self, workspace_id: str, thread_id: str
+    ) -> Tuple[Optional[str], Optional[str]]:
+        from . import main as orchestrator_main
+
+        hosts_map = orchestrator_main.LM_HOSTS
+        host_values = [value.rstrip("/") for value in hosts_map.values()]
+        if not host_values:
+            jlog(
+                logger,
+                level="WARN",
+                event="mpc_session_no_hosts",
+                workspace_id=workspace_id,
+                thread_id=thread_id,
+            )
+            return None, None
+        healthy = [
+            host
+            for host in host_values
+            if orchestrator_main.HOST_HEALTH.get(host) == "ok"
+        ]
+        host_choice = healthy[0] if healthy else host_values[0]
+        catalog_models = orchestrator_main.MODEL_CATALOG.get(host_choice) or []
+        model_id = catalog_models[0] if catalog_models else None
+        await sessions.set_host(workspace_id, thread_id, host_choice, model_id)
+        jlog(
+            logger,
+            event="mpc_session_host_assigned",
+            workspace_id=workspace_id,
+            thread_id=thread_id,
+            host=host_choice,
+            model=model_id,
+        )
+        return host_choice, model_id
+
+    async def _ensure_session_collection(
+        self, workspace_id: str, thread_id: str
+    ) -> Optional[str]:
+        if self.chroma is None:
+            return None
+        collection_name = self._collection_name_provider()
+        if not collection_name:
+            return None
+        collection_id = await self.chroma.ensure_collection(collection_name)
+        if collection_id:
+            await sessions.set_collection(
+                workspace_id, thread_id, collection_name, collection_id
+            )
+            jlog(
+                logger,
+                event="mpc_session_collection_ready",
+                workspace_id=workspace_id,
+                thread_id=thread_id,
+                collection=collection_name,
+                collection_id=collection_id,
+            )
+        return collection_id
 
     async def handle(self, ws: WebSocket):
         await ws.accept()
@@ -135,6 +193,8 @@ class MPCServer:
                 user_id=user_id,
                 persona_id=persona_id,
             )
+            await self._assign_session_host(workspace_id, thread_id)
+            await self._ensure_session_collection(workspace_id, thread_id)
             session = await sessions.get_session(workspace_id, thread_id)
             jlog(
                 logger,
@@ -148,17 +208,25 @@ class MPCServer:
             if not thread_id:
                 jlog(logger, level="ERROR", event="mpc_session_resume_missing")
                 return {"ok": False, "error": "thread_id_required"}
-            row = await sessions.get_session(workspace_id, thread_id)
-            if row:
+            session_row = await sessions.get_session(workspace_id, thread_id)
+            if session_row is not None:
                 await sessions.touch_session(workspace_id, thread_id)
+                if not session_row.get("host_url"):
+                    await self._assign_session_host(workspace_id, thread_id)
+                    session_row = await sessions.get_session(workspace_id, thread_id)
+                if session_row is not None and not session_row.get(
+                    "chroma_collection_id"
+                ):
+                    await self._ensure_session_collection(workspace_id, thread_id)
+                    session_row = await sessions.get_session(workspace_id, thread_id)
             jlog(
                 logger,
                 event="mpc_session_resumed",
                 workspace_id=workspace_id,
                 thread_id=thread_id,
-                found=bool(row),
+                found=bool(session_row),
             )
-            return {"ok": bool(row), "session": row}
+            return {"ok": bool(session_row), "session": session_row}
         jlog(logger, level="ERROR", event="mpc_session_unknown_action", action=action)
         return {"ok": False, "error": "unknown_session_action"}
 
@@ -331,7 +399,15 @@ async def mcp_socket(ws: WebSocket):
                     "body": res,
                 }
             elif scope == "config.read.result":
-                if not server.is_ready() or not server.auto_config_allowed():
+                from . import main as orchestrator_main
+
+                current_options = dict(orchestrator_main.CURRENT_OPTIONS)
+                auto_allowed = (
+                    server.is_ready()
+                    and server.auto_config_allowed()
+                    and current_options.get("auto_config", True)
+                )
+                if not auto_allowed:
                     frame = {
                         "id": rid,
                         "type": "mcp.response",
@@ -340,44 +416,57 @@ async def mcp_socket(ws: WebSocket):
                     }
                 else:
                     envmap = body if not legacy else msg.get("payload") or {}
-                    updates: Dict[str, Any] = {}
+                    patch: Dict[str, Any] = {}
                     if isinstance(envmap, dict):
-                        if envmap.get("LMSTUDIO_BASE_PATH"):
-                            updates["lm_hosts"] = [envmap["LMSTUDIO_BASE_PATH"]]
-                        if envmap.get("CHROMA_URL"):
-                            updates["chroma_mode"] = "http"
-                            updates["chroma_url"] = envmap["CHROMA_URL"]
-                    if updates:
+                        chroma_url = envmap.get("CHROMA_URL")
+                        lmstudio_path = envmap.get("LMSTUDIO_BASE_PATH")
+                        if (
+                            chroma_url
+                            and not current_options.get("lock_CHROMA_URL", False)
+                        ):
+                            patch["chroma_mode"] = "http"
+                            patch["chroma_url"] = chroma_url
+                        if (
+                            lmstudio_path
+                            and not current_options.get("lock_hosts", False)
+                            and not current_options.get(
+                                "lock_LMSTUDIO_BASE_PATH", False
+                            )
+                        ):
+                            patch["lm_hosts"] = [lmstudio_path]
+                    if patch:
                         try:
-                            async with httpx.AsyncClient(timeout=10) as client:
-                                r = await client.post(
-                                    "http://127.0.0.1:8001/api/options", json=updates
+                            async with httpx.AsyncClient(timeout=10.0) as client:
+                                response = await client.post(
+                                    "http://127.0.0.1:8001/api/options", json=patch
                                 )
-                                ok = r.status_code == 200
-                                frame = {
-                                    "id": rid,
-                                    "type": "mcp.response",
-                                    "ok": ok,
-                                    "body": {"applied": updates},
-                                }
-                                jlog(
-                                    logger,
-                                    event="mpc_config_applied",
-                                    ok=ok,
-                                    keys=list(updates.keys()),
-                                )
+                                ok = response.status_code == 200
                         except Exception as exc:  # pragma: no cover - network guard
+                            ok = False
+                            jlog(
+                                logger,
+                                level="ERROR",
+                                event="mpc_config_apply_failed",
+                                error=str(exc),
+                            )
                             frame = {
                                 "id": rid,
                                 "type": "mcp.response",
                                 "ok": False,
                                 "error": {"code": "APPLY_FAIL", "message": str(exc)},
                             }
+                        else:
+                            frame = {
+                                "id": rid,
+                                "type": "mcp.response",
+                                "ok": ok,
+                                "body": {"applied": patch if ok else {}},
+                            }
                             jlog(
                                 logger,
-                                level="ERROR",
-                                event="mpc_config_apply_failed",
-                                error=str(exc),
+                                event="mpc_config_applied",
+                                ok=ok,
+                                keys=list(patch.keys()),
                             )
                     else:
                         frame = {
@@ -396,36 +485,36 @@ async def mcp_socket(ws: WebSocket):
                     "body": res,
                 }
             elif scope == "resources.list":
-                catalog = await server.catalog_snapshot()
-                resources: List[Dict[str, Any]] = []
-                for host, models in catalog.items():
-                    for model_id in models:
-                        resources.append({"id": model_id, "host": host})
+                from . import main as orchestrator_main
+
+                catalog = dict(orchestrator_main.MODEL_CATALOG)
                 frame = {
                     "id": rid,
                     "type": "mcp.response",
                     "ok": True,
-                    "body": {"resources": resources},
+                    "body": {"catalog": catalog},
                 }
                 jlog(
                     logger,
                     event="mpc_resources_list",
-                    count=len(resources),
+                    hosts=len(catalog),
                 )
             elif scope == "resources.health":
-                catalog = await server.catalog_snapshot()
+                from . import main as orchestrator_main
+
+                health = dict(orchestrator_main.HOST_HEALTH)
                 ready = server.is_ready()
                 frame = {
                     "id": rid,
                     "type": "mcp.response",
                     "ok": True,
-                    "body": {"ready": ready, "hosts": catalog},
+                    "body": {"ready": ready, "host_health": health},
                 }
                 jlog(
                     logger,
                     event="mpc_resources_health",
                     ready=ready,
-                    hosts=len(catalog),
+                    hosts=len(health),
                 )
             elif scope and scope.startswith(
                 ("prompts.", "sampling.", "resources.", "agents.", "cathedral.")

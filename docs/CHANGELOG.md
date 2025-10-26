@@ -7,7 +7,9 @@
 - Version bump references set to `0.1.1` for Supervisor builds.
 
 ## Unreleased
-- Placeholder for future documentation updates.
+- Documented `/api/status` readiness payload (catalog, host health, sessions) and MPC host/model assignment.
+- Recorded SSE relay hardening with enforced `text/event-stream`, idle timeouts, and synthetic `[DONE]` frames.
+- Added `/api/options` hot-apply guardrails, per-key locks, and Chroma collection provisioning notes.
 
 ## Adopt EVE MegaDoc structure + HA env mirror
 - Added Cathedral MegaDoc, structured schema/spec/ops docs, and source doclets mirroring the EVE Data Export discipline.
