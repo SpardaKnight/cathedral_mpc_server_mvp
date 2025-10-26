@@ -1,5 +1,10 @@
 # Cathedral Orchestrator – Changelog
 
+## 1.1.5 – 2025-10-27
+- Externalized vector persistence to an HTTP Chroma service and removed chromadb from the add-on image.
+- Added safe bootstrap gating that requires healthy LM hosts and Chroma before enabling auto-config or vector upserts.
+- Simplified runtime install docs and tooling to reflect HTTP-only Chroma usage.
+
 ## 1.1.4 – 2025-10-26
 - Run the add-on under s6 v3 with `/init` as PID 1, moving startup into `/etc/services.d` and declaring `init: false`. No functional changes.
 
