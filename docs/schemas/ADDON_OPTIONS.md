@@ -4,7 +4,7 @@ The options below are authoritative for `cathedral_orchestrator/config.yaml` and
 
 | Option | Type | Required? | Default | Description | Example |
 | --- | --- | --- | --- | --- | --- |
-| `lm_hosts` | list(url) | Yes | `[]` | Ordered list of language model base URLs. Trailing `/v1` is stripped automatically. | `["http://192.168.1.233:1234"]` |
+| `lm_hosts` | list(url) | Yes | `[]` | Ordered list of language model base URLs. Trailing `/v1` is stripped automatically, and chat completions continue streaming via the dedicated relay that now enters `client.stream(...)` as an async context. | `["http://192.168.1.233:1234"]` |
 | `chroma_mode` | str (`"http"`) | Yes | `"http"` | HTTP mode only. Embedded mode has been removed; values other than `"http"` are coerced back to HTTP. | `"http"` |
 | `chroma_url` | str? | Conditional | `"http://127.0.0.1:8000"` | Remote Chroma endpoint used when `chroma_mode` is `"http"`. Ignored for embedded mode. | `"http://192.168.1.42:8000"` |
 | `chroma_persist_dir` | str? | Optional | `"/data/chroma"` | Legacy option retained for schema compatibility. Ignored by the HTTP-only client. | `"/data/chroma"` |

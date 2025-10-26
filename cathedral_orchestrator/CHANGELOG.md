@@ -1,5 +1,9 @@
 # Cathedral Orchestrator – Changelog
 
+## [1.1.15]
+- Fix `/v1/chat/completions` relay to enter the upstream `httpx.AsyncClient.stream` context properly for uninterrupted SSE proxying.
+- Bump Supervisor manifest metadata to release the streaming stability fix.
+
 ## [1.1.14]
 - Point `/v1/chat/completions` directly at the dedicated LM Studio relay on `http://192.168.1.175:1234` using a raw streaming proxy.
 - Document the fixed upstream routing and bump Supervisor manifest version to release the relay update.

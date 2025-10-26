@@ -633,18 +633,18 @@ async def _route_for_model(model: str) -> str:
 @app.post("/v1/chat/completions")
 async def relay_chat_completions(request: Request):
     async with httpx.AsyncClient(timeout=None) as client:
-        upstream = await client.stream(
+        async with client.stream(
             "POST",
-            "http://192.168.1.175:1234/v1/chat/completions",  # Update to real LM Studio IP if dynamic
+            "http://192.168.1.175:1234/v1/chat/completions",  # Update if LM Studio endpoint differs
             headers=request.headers,
             content=await request.body(),
-        )
+        ) as upstream:
 
-        async def forward():
-            async for chunk in upstream.aiter_raw():
-                yield chunk
+            async def forward():
+                async for chunk in upstream.aiter_raw():
+                    yield chunk
 
-        return StreamingResponse(forward(), media_type="text/event-stream")
+            return StreamingResponse(forward(), media_type="text/event-stream")
 
 
 @app.post("/v1/embeddings")
