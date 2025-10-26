@@ -11,8 +11,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /opt/app
 COPY orchestrator/ /opt/app/orchestrator/
-COPY run.sh /opt/app/run.sh
-RUN chmod +x /opt/app/run.sh
 
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
