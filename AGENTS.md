@@ -15,7 +15,7 @@
 6. Do not switch away from Debian+`/opt/venv` or fall back to system `pip`/Alpine bases.
 7. Keep ports and filesystem paths stable: `/opt/app/orchestrator`, `/opt/venv`, `/data` mounts.
 8. Treat docs as first-class: any behavioral or manifest change must update the MegaDoc, schema docs, and CHANGELOG in the same PR.
-9. The only authorized test is the Docker build acceptance test that validates add-on installation and visibility inside Home Assistant. No other test suites, mock servers, or network simulations are permitted. Codex must not run or recreate any non-Docker test.
+9. CI is static-only. Codex may run lint with Ruff, type checks with mypy, and pure unit tests with pytest that do not require Home Assistant, Docker, networking, or device filesystems. Any HA or Supervisor run, s6 boot, Docker build, or networked check is out of scope for Codex and must not be added to CI.
 
 10. The base image MUST be supplied by Supervisor via `BUILD_FROM` and mapped through `build.json` to `ghcr.io/home-assistant/*-base-debian:bookworm`. Do not switch tags or hardcode a base in the Dockerfile. Local smoke builds must pass `--build-arg BUILD_FROM` explicitly.
 
@@ -40,3 +40,43 @@
 ## Workflow Guardrails
 
 13. Codex-initiated runs (repository_dispatch) remain authorized. GitHub-hosted automatic Actions triggered by push or pull_request are prohibited to prevent consumption of hosted runner minutes.
+
+### CI and Test Policy (Static-Only, HA-Compliant)
+
+**Intent.** This repository targets a Home Assistant add-on. HA add-ons are validated at runtime by the Supervisor s6 init model (PID 1 is `/init`; `init: false` required). Those invariants cannot be executed in this environment, therefore agents run only static checks and pure unit tests.
+
+**Allowed commands - use exactly these:**
+```bash
+ruff check addons/cathedral_orchestrator/orchestrator clients custom_components
+```
+```bash
+mypy addons/cathedral_orchestrator/orchestrator
+```
+```bash
+pytest -q tests/unit
+```
+Note: mypy uses `ignore_missing_imports = True` from `mypy.ini`.
+
+Forbidden - do not run:
+
+- `docker`, `make -C dev build_amd64`, or any image build
+- Supervisor, HA Core, or s6 boot assumptions
+- HTTP or WebSocket calls to HA, LM Studio, or Chroma
+- Reading or writing `/data` or other container paths outside a stubbed unit context
+
+Disposition of non-compliant tests:
+
+- `tests/test_addon_installation.py` must be skipped at module level:
+
+  ```python
+  import pytest
+  pytestmark = pytest.mark.skip(reason="Disabled: requires Docker or HA runtime not available in this environment.")
+  ```
+
+  If the file contains only Docker or HA checks you may delete it instead.
+
+Documentation anchors for agents:
+
+- S6 v3 base image note - init: false and PID 1 enforcement: <https://developers.home-assistant.io/blog/2022/05/12/s6-overlay-base-images>
+- Add-on tutorial - init: false and Supervisor lifecycle: <https://developers.home-assistant.io/docs/add-ons/tutorial>
+- Add-on configuration reference - init option: <https://developers.home-assistant.io/docs/add-ons/configuration>
