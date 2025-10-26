@@ -1,15 +1,18 @@
 from __future__ import annotations
-import asyncio, aiohttp
+
+import aiohttp
 from datetime import timedelta
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.core import HomeAssistant
 from .const import DOMAIN
 
+
 class CathedralCoordinator(DataUpdateCoordinator):
     def __init__(self, hass: HomeAssistant, base_url: str):
         self._base = base_url.rstrip("/")
         super().__init__(
-            hass, hass.helpers.logger.getLogger(DOMAIN),
+            hass,
+            hass.helpers.logger.getLogger(DOMAIN),
             name="Cathedral MPC Coordinator",
             update_interval=timedelta(seconds=10),
         )

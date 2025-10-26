@@ -14,7 +14,8 @@ from .vector.chroma_client import ChromaClient
 
 router = APIRouter()
 
-logger = setup_logging(os.environ.get("LOG_LEVEL","INFO"))
+logger = setup_logging(os.environ.get("LOG_LEVEL", "INFO"))
+
 
 class MPCServer:
     def __init__(self, toolbridge: ToolBridge, chroma: ChromaClient):
@@ -36,7 +37,16 @@ class MPCServer:
                         res = await self._handle_session(msg)
                     elif scope.startswith("memory."):
                         res = await self._handle_memory(msg)
-                    elif scope.startswith(("config.","prompts.","sampling.","resources.","agents.","cathedral.")):
+                    elif scope.startswith(
+                        (
+                            "config.",
+                            "prompts.",
+                            "sampling.",
+                            "resources.",
+                            "agents.",
+                            "cathedral.",
+                        )
+                    ):
                         res = await self._handle_generic(msg)
                     else:
                         res = {"ok": False, "error": "unknown_scope"}
@@ -47,12 +57,14 @@ class MPCServer:
         except WebSocketDisconnect:
             return
 
-    async def _handle_tools(self, msg: Dict[str,Any]) -> Dict[str,Any]:
+    async def _handle_tools(self, msg: Dict[str, Any]) -> Dict[str, Any]:
         tool = msg.get("tool")
+        if not isinstance(tool, str) or not tool:
+            return {"ok": False, "error": "invalid_tool_name"}
         payload = msg.get("payload") or {}
         return await self.tb.call(tool, payload)
 
-    async def _handle_session(self, msg: Dict[str,Any]) -> Dict[str,Any]:
+    async def _handle_session(self, msg: Dict[str, Any]) -> Dict[str, Any]:
         action = msg.get("action")
         workspace_id = msg.get("workspace_id") or "default"
         if action == "create":
@@ -80,7 +92,7 @@ class MPCServer:
         else:
             return {"ok": False, "error": "unknown_session_action"}
 
-    async def _handle_memory(self, msg: Dict[str,Any]) -> Dict[str,Any]:
+    async def _handle_memory(self, msg: Dict[str, Any]) -> Dict[str, Any]:
         # The orchestrator itself does not embed. Embeddings are produced by LM Studio via /v1/embeddings API.
         # This handler expects the client to pass documents/embeddings OR pass text with precomputed embedding from our HTTP path.
         action = msg.get("action")
@@ -89,16 +101,20 @@ class MPCServer:
             embeddings = msg.get("embeddings")
             documents = msg.get("documents")
             metadatas = msg.get("metadatas")
-            res = self.chroma.upsert(ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
+            res = self.chroma.upsert(
+                ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas
+            )
             return res
         else:
             return {"ok": False, "error": "unknown_memory_action"}
 
-    async def _handle_generic(self, msg: Dict[str,Any]) -> Dict[str,Any]:
+    async def _handle_generic(self, msg: Dict[str, Any]) -> Dict[str, Any]:
         # Minimal echo for spec completeness; can be extended in Phase-2+
         return {"ok": True, "echo": msg.get("payload", {})}
 
+
 mpc_server_singleton: Optional[MPCServer] = None
+
 
 def get_server() -> MPCServer:
     global mpc_server_singleton
@@ -106,9 +122,11 @@ def get_server() -> MPCServer:
         raise RuntimeError("MPC server not initialized")
     return mpc_server_singleton
 
+
 def set_server(server: MPCServer):
     global mpc_server_singleton
     mpc_server_singleton = server
+
 
 @router.websocket("/")
 async def mcp_socket(ws: WebSocket):
@@ -156,10 +174,10 @@ async def mcp_socket(ws: WebSocket):
                 if not tool:
                     tool = msg.get("tool") or payload.get("tool")
                 args = (
-                    body.get("args")
-                    if not legacy
-                    else msg.get("payload")
-                ) or payload.get("payload") or {}
+                    (body.get("args") if not legacy else msg.get("payload"))
+                    or payload.get("payload")
+                    or {}
+                )
                 res = await server._handle_tools({"tool": tool, "payload": args})
                 frame = {
                     "id": rid,
@@ -188,7 +206,9 @@ async def mcp_socket(ws: WebSocket):
                 if updates:
                     try:
                         async with httpx.AsyncClient(timeout=10) as client:
-                            r = await client.post("http://127.0.0.1:8001/api/options", json=updates)
+                            r = await client.post(
+                                "http://127.0.0.1:8001/api/options", json=updates
+                            )
                             ok = r.status_code == 200
                             frame = {
                                 "id": rid,

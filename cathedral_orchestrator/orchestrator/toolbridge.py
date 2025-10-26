@@ -1,11 +1,14 @@
-import os, json, httpx
-from typing import Dict, Any, List
+import os
+from typing import Any, Dict, List
+
+import httpx
 
 # Tools delegation to HA: allow-list domains; call Core REST API /api/services/{domain}/{service}
-# REST API docs: https://developers.home-assistant.io/docs/api/rest/ 
+# REST API docs: https://developers.home-assistant.io/docs/api/rest/
 
 SUPERVISOR_BASE = os.environ.get("SUPERVISOR_BASE", "http://supervisor")
 SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
+
 
 class ToolBridge:
     def __init__(self, allowed_domains: List[str]):
@@ -21,7 +24,10 @@ class ToolBridge:
             return {"ok": False, "error": f"domain_not_allowed:{domain}"}
         # Basic argument validation
         data = payload or {}
-        headers = {"Authorization": f"Bearer {SUPERVISOR_TOKEN}", "Content-Type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {SUPERVISOR_TOKEN}",
+            "Content-Type": "application/json",
+        }
         url = f"{SUPERVISOR_BASE}/core/api/services/{domain}/{service}"
         async with httpx.AsyncClient(timeout=10) as client:
             r = await client.post(url, headers=headers, json=data)

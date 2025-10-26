@@ -1,4 +1,11 @@
-import subprocess, sys
+import shutil
+import subprocess
+
+import pytest
+
+
+if shutil.which("docker") is None:
+    pytest.skip("docker CLI not available", allow_module_level=True)
 
 
 def test_addon_installation():
