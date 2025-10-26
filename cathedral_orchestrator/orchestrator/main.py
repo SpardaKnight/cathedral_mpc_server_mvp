@@ -156,16 +156,7 @@ class HostPool:
 
 class SessionManager:
     async def list_active(self) -> int:
-        try:
-            async with await sessions._connect() as db:  # type: ignore[attr-defined]
-                row = await (
-                    await db.execute("SELECT COUNT(*) FROM sessions")
-                ).fetchone()
-                count = row[0] if row else 0
-        except Exception as exc:  # pragma: no cover - sqlite guard
-            jlog(logger, level="ERROR", event="session_count_failed", error=str(exc))
-            return 0
-        jlog(logger, level="DEBUG", event="session_count", count=count)
+        count = await sessions.list_active()
         return int(count)
 
 
@@ -184,6 +175,32 @@ UPSERTS_ENABLED: bool = bool(CURRENT_OPTIONS.get("upserts_enabled", True))
 
 HOST_POOL: Optional[HostPool] = HostPool(LM_HOSTS)
 SESSION_MANAGER = SessionManager()
+
+PRUNE_INTERVAL_SECONDS = 15 * 60
+SESSION_TTL_MINUTES = 120
+
+
+async def _session_prune_loop() -> None:
+    while True:
+        try:
+            pruned = await sessions.prune_idle(ttl_minutes=SESSION_TTL_MINUTES)
+            jlog(
+                logger,
+                event="session_prune_cycle",
+                pruned=pruned,
+                ttl_minutes=SESSION_TTL_MINUTES,
+            )
+        except asyncio.CancelledError:
+            jlog(logger, event="session_prune_cycle_cancelled")
+            raise
+        except Exception as exc:  # pragma: no cover - scheduler guard
+            jlog(
+                logger,
+                level="ERROR",
+                event="session_prune_cycle_failed",
+                error=str(exc),
+            )
+        await asyncio.sleep(PRUNE_INTERVAL_SECONDS)
 
 chroma = ChromaClient(
     ChromaConfig(
@@ -265,10 +282,16 @@ async def lifespan(app: FastAPI):
         timeout=30,
         limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
     )
+    prune_task = asyncio.create_task(_session_prune_loop())
     try:
         await reload_clients_from_options(dict(CURRENT_OPTIONS))
         yield
     finally:
+        prune_task.cancel()
+        try:
+            await prune_task
+        except asyncio.CancelledError:  # pragma: no cover - shutdown guard
+            pass
         await asyncio.gather(*(client.aclose() for client in APP_CLIENTS.values()))
         APP_CLIENTS.clear()
 
