@@ -632,19 +632,43 @@ async def _route_for_model(model: str) -> str:
 
 @app.post("/v1/chat/completions")
 async def relay_chat_completions(request: Request):
-    async with httpx.AsyncClient(timeout=None) as client:
-        async with client.stream(
-            "POST",
-            "http://192.168.1.175:1234/v1/chat/completions",  # Update if LM Studio endpoint differs
-            headers=request.headers,
-            content=await request.body(),
-        ) as upstream:
+    if not LM_HOSTS:
+        raise HTTPException(status_code=503, detail="no lm hosts configured")
 
-            async def forward():
-                async for chunk in upstream.aiter_raw():
-                    yield chunk
+    lm_base = list(LM_HOSTS.values())[0]
+    url = f"{lm_base.rstrip('/')}/v1/chat/completions"
 
-            return StreamingResponse(forward(), media_type="text/event-stream")
+    fwd_headers = {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+    }
+    auth = request.headers.get("authorization")
+    if auth:
+        fwd_headers["Authorization"] = auth
+
+    try:
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream(
+                "POST",
+                url,
+                headers=fwd_headers,
+                content=await request.body(),
+            ) as upstream:
+
+                async def forward():
+                    async for chunk in upstream.aiter_raw():
+                        yield chunk
+
+                return StreamingResponse(forward(), media_type="text/event-stream")
+    except httpx.HTTPError as exc:
+        jlog(
+            logger,
+            level="ERROR",
+            event="chat_relay_upstream_error",
+            url=url,
+            error=str(exc),
+        )
+        raise HTTPException(status_code=502, detail="upstream_http_error") from exc
 
 
 @app.post("/v1/embeddings")

@@ -1,5 +1,10 @@
 # Cathedral Orchestrator – Changelog
 
+## [1.1.16]
+- Restore `/v1/chat/completions` to relay through the configured LM host catalog instead of a hardcoded LAN endpoint while retaining raw SSE streaming.
+- Log upstream transport failures as structured 502 errors and keep Authorization forwarding minimal for pass-through compliance.
+- Update manifests and documentation to describe the hostpool-driven relay.
+
 ## [1.1.15]
 - Fix `/v1/chat/completions` relay to enter the upstream `httpx.AsyncClient.stream` context properly for uninterrupted SSE proxying.
 - Bump Supervisor manifest metadata to release the streaming stability fix.
