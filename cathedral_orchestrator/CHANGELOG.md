@@ -1,5 +1,8 @@
 # Cathedral Orchestrator – Changelog
 
+## [1.1.9]
+- Fix Uvicorn import path by switching to `--app-dir /opt/app` and exporting `PYTHONPATH` before launch.
+
 ## [1.1.8]
 - Manifest discipline: `init: false` affirmed, supervisor startup retained, and version bumped for release sync.
 - Dockerfile aligned with HA base entrypoint expectations (no CMD/ENTRYPOINT overrides; relies on `/init`).

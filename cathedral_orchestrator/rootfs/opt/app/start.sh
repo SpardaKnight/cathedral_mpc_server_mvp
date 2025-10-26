@@ -37,5 +37,8 @@ if [ -n "${CHROMA_URL:-}" ]; then
   echo "[READY] Chroma docs available at $DOCS"
 fi
 
+cd /opt/app
+export PYTHONPATH="/opt/app:${PYTHONPATH:-}"
+
 echo "[INFO] Launching Cathedral Orchestrator"
-exec uvicorn orchestrator.main:app --host 0.0.0.0 --port 8001
+exec uvicorn --app-dir /opt/app orchestrator.main:app --host 0.0.0.0 --port 8001
