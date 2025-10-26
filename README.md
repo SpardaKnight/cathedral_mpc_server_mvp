@@ -17,7 +17,8 @@ Cathedral Orchestrator bridges Home Assistant with Cathedral’s OpenAI-compatib
 ## Add-on Runtime
 - The Home Assistant base image ships s6-overlay v3 with `/init` as PID 1. The add-on manifest sets `init: false` so Supervisor keeps `/init` in control—no `host_pid` escape hatches are allowed.
 - `cathedral_orchestrator/Dockerfile` starts with `ARG BUILD_FROM` / `FROM $BUILD_FROM` and relies on the base entrypoint; we ship only the runtime payload plus chmods (no custom CMD/ENTRYPOINT).
-- Service layout lives under `rootfs/etc/services.d/cathedral/`: the execlineb `run` file calls `/opt/app/start.sh`, the script probes LM hosts (`/v1/models`) and optional Chroma docs before `exec uvicorn orchestrator.main:app --host 0.0.0.0 --port 8001`.
+- Service layout lives under `rootfs/etc/services.d/cathedral/`: the execlineb `run` file calls `/opt/app/start.sh`, the script probes LM hosts (`/v1/models`) and optional Chroma docs before `exec uvicorn --app-dir /opt/app orchestrator.main:app --host 0.0.0.0 --port 8001`.
+- Uvicorn is launched with `--app-dir /opt/app` so the orchestrator package is importable within the container.
 - The companion `finish` handler issues `/run/s6/basedir/bin/halt` so Supervisor gets an orderly shutdown signal.
 
 ## Configuration Snapshot
