@@ -19,6 +19,11 @@
 
 10. The base image MUST be supplied by Supervisor via `BUILD_FROM` and mapped through `build.json` to `ghcr.io/home-assistant/*-base-debian:bookworm`. Do not switch tags or hardcode a base in the Dockerfile. Local smoke builds must pass `--build-arg BUILD_FROM` explicitly.
 
+## Runtime Layout (s6 v3)
+- Supervisor keeps `/init` as PID 1. Leave `init: false` in `cathedral_orchestrator/config.yaml` and never enable `host_pid`.
+- `cathedral_orchestrator/Dockerfile` must begin with `ARG BUILD_FROM` / `FROM $BUILD_FROM` and add no CMD/ENTRYPOINT overrides—only payload copy + chmod adjustments.
+- Service launch chain lives in `rootfs/etc/services.d/cathedral/`: execlineb `run` → `/opt/app/start.sh` (with LM/Chroma probes) → `exec uvicorn ... --port 8001`; `finish` issues `/run/s6/basedir/bin/halt` for orderly shutdowns.
+
 ## Task Classes & Acceptance
 - Documentation-only updates must honor the guardrails and keep schema references accurate.
 - Manifest/schema adjustments require matching updates across YAML, JSON, and docs.

@@ -1,5 +1,11 @@
 # Cathedral Orchestrator – Changelog
 
+## [1.1.8]
+- Manifest discipline: `init: false` affirmed, supervisor startup retained, and version bumped for release sync.
+- Dockerfile aligned with HA base entrypoint expectations (no CMD/ENTRYPOINT overrides; relies on `/init`).
+- Service layout hardened: execlineb `run` delegating to `/opt/app/start.sh` with LM/Chroma probes before `exec uvicorn`.
+- s6 finish handler, executable bits, and LF normalization tracked in git to prevent drift.
+
 ## [1.1.6]
 - Refactored add-on startup: removed run.sh, resolved s6-overlay PID 1 conflict, moved all launch logic to service script.
 
