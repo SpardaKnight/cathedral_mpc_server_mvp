@@ -1,0 +1,4 @@
+- Implement v3.1 orchestration surfaces: `/api/status` now reports merged model catalogs, host health, readiness, and session counts using the refreshed LM pool.
+- Hardened `/v1/chat/completions` SSE relay with client disconnect detection, idle timeouts, and guaranteed `[DONE]` terminators to avoid stalled conversations.
+- Added pydantic-backed `/api/options` handling with per-key locks, host/model catalog refresh, and proactive Chroma collection provisioning for MPC sessions.
+- Extended MPC session bootstrap to assign healthy hosts/models, persist collection metadata, and honor AnythingLLM `config.read.result` updates under lock governance.

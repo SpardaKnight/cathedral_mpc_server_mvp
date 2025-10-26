@@ -14,6 +14,8 @@ from fastapi.responses import StreamingResponse
 from starlette.responses import JSONResponse
 from starlette.responses import PlainTextResponse  # noqa: F401
 
+from pydantic import BaseModel, Field, ValidationError
+
 from . import sessions
 from .logging_config import jlog, setup_logging
 from .mpc_server import MPCServer, get_server, router as mpc_router, set_server
@@ -160,7 +162,36 @@ class SessionManager:
         return int(count)
 
 
+class OptionsModel(BaseModel):
+    lm_hosts: List[str] = Field(default_factory=list)
+    chroma_mode: str = "http"
+    chroma_url: Optional[str] = None
+    chroma_persist_dir: Optional[str] = None
+    collection_name: str = "cathedral"
+    allowed_domains: List[str] = Field(
+        default_factory=lambda: ["light", "switch", "scene"]
+    )
+    temperature: float = 0.7
+    top_p: float = 0.9
+    upserts_enabled: bool = True
+    auto_config: bool = True
+    auto_discovery: bool = False
+    lock_hosts: bool = False
+    lock_LMSTUDIO_BASE_PATH: bool = False
+    lock_EMBEDDING_BASE_PATH: bool = False
+    lock_CHROMA_URL: bool = False
+    lock_VECTOR_DB: bool = False
+
+
+DEFAULT_OPTIONS = OptionsModel().model_dump()
+
 CURRENT_OPTIONS = load_options_from_disk()
+if CURRENT_OPTIONS:
+    merged = {**DEFAULT_OPTIONS, **CURRENT_OPTIONS}
+    CURRENT_OPTIONS = OptionsModel(**merged).model_dump()
+else:
+    CURRENT_OPTIONS = dict(DEFAULT_OPTIONS)
+
 LM_HOSTS: Dict[str, str] = _normalize_lm_hosts(CURRENT_OPTIONS.get("lm_hosts"))
 CHROMA_MODE: str = "http"
 CHROMA_URL: str = CURRENT_OPTIONS.get("chroma_url", "http://127.0.0.1:8000")
@@ -178,12 +209,15 @@ UPSERTS_ACTIVE: bool = False
 HOST_POOL: Optional[HostPool] = HostPool(LM_HOSTS)
 SESSION_MANAGER = SessionManager()
 BOOTSTRAP_EVENT = asyncio.Event()
+MODEL_CATALOG: Dict[str, List[str]] = {}
+HOST_HEALTH: Dict[str, str] = {}
 
 PRUNE_INTERVAL_SECONDS = 15 * 60
 SESSION_TTL_MINUTES = 120
 
 _prune_thread: Optional[threading.Thread] = None
 _prune_stop = threading.Event()
+_prune_lock = threading.Lock()
 
 
 def _prune_loop() -> None:
@@ -219,33 +253,37 @@ def _prune_loop() -> None:
 
 def _start_pruner_if_needed() -> None:
     global _prune_thread
-    if _prune_thread and _prune_thread.is_alive():
-        jlog(logger, event="session_prune_loop_active")
-        return
-    _prune_stop.clear()
-    _prune_thread = threading.Thread(
-        target=_prune_loop,
-        name="ttl-pruner",
-        daemon=True,
-    )
-    _prune_thread.start()
-    jlog(logger, event="session_prune_loop_spawned")
+    with _prune_lock:
+        if _prune_thread and _prune_thread.is_alive():
+            jlog(logger, event="session_prune_loop_active")
+            return
+        _prune_stop.clear()
+        thread = threading.Thread(
+            target=_prune_loop,
+            name="ttl-pruner",
+            daemon=True,
+        )
+        _prune_thread = thread
+        thread.start()
+        jlog(logger, event="session_prune_loop_spawned")
 
 
 def stop_pruner() -> None:
     global _prune_thread
-    thread = _prune_thread
-    jlog(logger, event="session_prune_loop_stop_requested")
-    _prune_stop.set()
-    if thread and thread.is_alive():
-        thread.join(timeout=5)
-        if thread.is_alive():
-            jlog(logger, level="WARN", event="session_prune_loop_stop_timeout")
+    with _prune_lock:
+        thread = _prune_thread
+        jlog(logger, event="session_prune_loop_stop_requested")
+        _prune_stop.set()
+        if thread and thread.is_alive():
+            thread.join(timeout=5)
+            if thread.is_alive():
+                jlog(logger, level="WARN", event="session_prune_loop_stop_timeout")
+            else:
+                jlog(logger, event="session_prune_loop_joined")
         else:
-            jlog(logger, event="session_prune_loop_joined")
-    else:
-        jlog(logger, event="session_prune_loop_not_running")
-    _prune_thread = None
+            jlog(logger, event="session_prune_loop_not_running")
+        _prune_thread = None
+        _prune_stop.clear()
 
 
 CHROMA_CONFIG = ChromaConfig(url=CHROMA_URL, collection_name=COLLECTION_NAME)
@@ -300,6 +338,18 @@ async def reload_clients_from_options(
     except RuntimeError:
         pass
 
+    if CHROMA_CLIENT is not None and CHROMA_MODE == "http":
+        try:
+            await CHROMA_CLIENT.ensure_collection(COLLECTION_NAME)
+        except Exception as exc:  # pragma: no cover - chroma guard
+            jlog(
+                logger,
+                level="WARN",
+                event="chroma_collection_bootstrap_failed",
+                error=str(exc),
+                collection=COLLECTION_NAME,
+            )
+
     client = APP_CLIENTS.get("lm")
     if client:
         await HOST_POOL.refresh(client)
@@ -307,6 +357,16 @@ async def reload_clients_from_options(
         jlog(logger, level="WARN", event="hostpool_refresh_deferred")
 
     await update_bootstrap_state(force_refresh=False)
+
+    try:
+        await _refresh_model_catalog()
+    except Exception as exc:  # pragma: no cover - defensive guard
+        jlog(
+            logger,
+            level="WARN",
+            event="model_catalog_refresh_failed",
+            error=str(exc),
+        )
 
     logger.info("=== Cathedral Orchestrator reload ===")
     jlog(
@@ -319,6 +379,55 @@ async def reload_clients_from_options(
         upserts_requested=UPSERTS_REQUESTED,
     )
     return options
+
+
+async def _refresh_model_catalog() -> None:
+    global MODEL_CATALOG, HOST_HEALTH
+    hosts = [host.rstrip("/") for host in LM_HOSTS.values()]
+    catalog: Dict[str, List[str]] = {}
+    health: Dict[str, str] = {}
+    if not hosts:
+        MODEL_CATALOG = {}
+        HOST_HEALTH = {}
+        jlog(logger, event="model_catalog_empty")
+        return
+    for host in hosts:
+        url = f"{host}/v1/models"
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(10.0, connect=5.0)
+            ) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                data = response.json()
+                models: List[str] = []
+                if isinstance(data, dict) and isinstance(data.get("data"), list):
+                    for item in data["data"]:
+                        if isinstance(item, dict):
+                            identifier = item.get("id") or item.get("name")
+                            if identifier:
+                                models.append(str(identifier))
+                catalog[host] = models
+                health[host] = "ok"
+                jlog(
+                    logger,
+                    event="model_catalog_host",
+                    host=host,
+                    models=len(models),
+                )
+        except Exception as exc:  # pragma: no cover - network guard
+            catalog[host] = []
+            health[host] = "down"
+            jlog(
+                logger,
+                level="WARN",
+                event="model_catalog_fetch_failed",
+                host=host,
+                error=str(exc),
+            )
+    MODEL_CATALOG = catalog
+    HOST_HEALTH = health
+    jlog(logger, event="model_catalog_refreshed", hosts=len(catalog))
 
 
 def is_bootstrap_ready() -> bool:
@@ -388,6 +497,31 @@ async def update_bootstrap_state(
     )
 
 
+async def get_readiness() -> Tuple[bool, bool, bool]:
+    catalog_snapshot = dict(MODEL_CATALOG)
+    lm_ready = any(models for models in catalog_snapshot.values())
+    if CHROMA_URL and CHROMA_CLIENT is not None:
+        chroma_ready = await CHROMA_CLIENT.health_ok()
+    elif CHROMA_URL:
+        chroma_ready = False
+    else:
+        chroma_ready = True
+    ready = lm_ready and chroma_ready
+    await update_bootstrap_state(
+        force_refresh=False,
+        catalog_override=catalog_snapshot if catalog_snapshot else None,
+        chroma_ready_override=chroma_ready,
+    )
+    jlog(
+        logger,
+        event="readiness_snapshot",
+        ready=ready,
+        lm_ready=lm_ready,
+        chroma_ready=chroma_ready,
+    )
+    return ready, lm_ready, chroma_ready
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     APP_CLIENTS["lm"] = httpx.AsyncClient(
@@ -423,18 +557,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Cathedral Orchestrator", lifespan=lifespan)
 app.include_router(mpc_router, prefix="/mcp")
-
-
-def _coerce_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    if isinstance(value, (int, float)):
-        return bool(value)
-    return False
-
-
 @app.get("/health")
 async def health():
     client = APP_CLIENTS.get("lm")
@@ -484,107 +606,81 @@ async def health():
 
 
 @app.get("/api/status")
-async def api_status():
-    if HOST_POOL is None or not HOST_POOL.is_ready():
-        raise HTTPException(status_code=503, detail="host pool not ready")
-    client = APP_CLIENTS.get("lm")
-    if client and not (await HOST_POOL.get_catalog()):
-        await HOST_POOL.refresh(client)
-    catalog = await HOST_POOL.get_catalog()
-    await update_bootstrap_state(force_refresh=False, catalog_override=catalog)
+async def api_status() -> JSONResponse:
+    await _refresh_model_catalog()
+    ready, lm_ready, chroma_ready = await get_readiness()
     sessions_active = await SESSION_MANAGER.list_active()
     options_snapshot = dict(CURRENT_OPTIONS)
+    catalog_snapshot = dict(MODEL_CATALOG)
+    host_health_snapshot = dict(HOST_HEALTH)
     response = {
-        "ok": True,
-        "updated_at": datetime.utcnow().isoformat() + "Z",
+        "ok": ready,
+        "lm_ready": lm_ready,
+        "chroma_ready": chroma_ready,
         "sessions_active": sessions_active,
-        "auto_config": AUTO_CONFIG_REQUESTED,
+        "catalog": catalog_snapshot,
+        "host_health": host_health_snapshot,
+        "auto_config_requested": bool(
+            options_snapshot.get("auto_config", AUTO_CONFIG_REQUESTED)
+        ),
         "auto_config_active": AUTO_CONFIG_ACTIVE,
+        "upserts_enabled": bool(options_snapshot.get("upserts_enabled", True)),
+        "upserts_active": UPSERTS_ACTIVE,
         "auto_discovery": bool(options_snapshot.get("auto_discovery", False)),
         "lock_hosts": bool(options_snapshot.get("lock_hosts", False)),
-        "upserts_enabled": UPSERTS_REQUESTED,
-        "upserts_active": UPSERTS_ACTIVE,
-        "bootstrap_ready": BOOTSTRAP_EVENT.is_set(),
-        "hosts": catalog,
+        "updated_at": datetime.utcnow().isoformat() + "Z",
     }
     jlog(
         logger,
         event="api_status",
         sessions=response["sessions_active"],
-        host_count=len(catalog),
-        bootstrap_ready=response["bootstrap_ready"],
+        host_count=len(catalog_snapshot),
+        ready=ready,
+        lm_ready=lm_ready,
+        chroma_ready=chroma_ready,
     )
     return JSONResponse(response)
 
 
 @app.get("/api/options")
-async def api_options():
-    async with OPTIONS_LOCK:
-        options = load_options_from_disk()
-    if options and options != CURRENT_OPTIONS:
-        await reload_clients_from_options(dict(options))
+async def api_options() -> JSONResponse:
     jlog(logger, event="api_options_get")
-    return JSONResponse(options)
+    return JSONResponse(dict(CURRENT_OPTIONS))
 
 
 @app.post("/api/options")
-async def api_set_options(request: Request):
-    payload = await request.json()
-    mutable_keys = {
-        "auto_config",
-        "auto_discovery",
-        "lock_hosts",
-        "lock_LMSTUDIO_BASE_PATH",
-        "lock_EMBEDDING_BASE_PATH",
-        "lock_CHROMA_URL",
-        "lock_VECTOR_DB",
-        "lm_hosts",
-        "chroma_mode",
-        "chroma_url",
-        "chroma_persist_dir",
-        "collection_name",
-        "allowed_domains",
-        "temperature",
-        "top_p",
-        "upserts_enabled",
-    }
-    bool_keys = {
-        "auto_config",
-        "auto_discovery",
-        "lock_hosts",
-        "lock_LMSTUDIO_BASE_PATH",
-        "lock_EMBEDDING_BASE_PATH",
-        "lock_CHROMA_URL",
-        "lock_VECTOR_DB",
-        "upserts_enabled",
-    }
-
-    updates: Dict[str, Any] = {}
-    for key, value in payload.items():
-        if key not in mutable_keys:
-            continue
-        if key in bool_keys:
-            updates[key] = _coerce_bool(value)
-        else:
-            updates[key] = value
-
-    if not updates:
-        jlog(logger, level="INFO", event="api_options_noop")
-        return JSONResponse({"ok": True, "updated": {}}, status_code=200)
-
+async def api_set_options(request: Request) -> JSONResponse:
+    body = await request.json()
+    if not isinstance(body, dict):
+        jlog(logger, level="ERROR", event="api_options_invalid_payload")
+        return JSONResponse({"ok": False, "error": "invalid_payload"}, status_code=400)
+    merged = {**DEFAULT_OPTIONS, **CURRENT_OPTIONS, **body}
+    try:
+        validated = OptionsModel.model_validate(merged)
+    except ValidationError as exc:
+        jlog(
+            logger,
+            level="ERROR",
+            event="api_options_validation_failed",
+            error=str(exc),
+        )
+        return JSONResponse({"ok": False, "error": "validation_failed"}, status_code=400)
+    payload = dict(validated.model_dump())
     async with OPTIONS_LOCK:
-        options = load_options_from_disk()
-        options.update(updates)
         try:
-            persist_options_to_disk(options)
+            persist_options_to_disk(payload)
         except Exception:
+            jlog(
+                logger,
+                level="ERROR",
+                event="api_options_persist_failed",
+            )
             return JSONResponse(
                 {"ok": False, "error": "persist_failed"}, status_code=500
             )
-
-    await reload_clients_from_options(dict(options))
-    jlog(logger, event="api_options_updated", keys=list(updates.keys()))
-    return JSONResponse({"ok": True, "options": options})
+    await reload_clients_from_options(dict(payload))
+    jlog(logger, event="api_options_updated", keys=list(payload.keys()))
+    return JSONResponse({"ok": True, "options": dict(CURRENT_OPTIONS)})
 
 
 @app.get("/v1/models")
@@ -656,10 +752,41 @@ async def relay_chat_completions(request: Request):
             ) as upstream:
 
                 async def forward():
-                    async for chunk in upstream.aiter_raw():
-                        yield chunk
+                    agen = upstream.aiter_raw()
+                    idle_timeout = 300
+                    saw_done = False
+                    while True:
+                        if await request.is_disconnected():
+                            jlog(
+                                logger,
+                                event="chat_relay_client_disconnected",
+                                url=url,
+                            )
+                            break
+                        try:
+                            chunk = await asyncio.wait_for(
+                                agen.__anext__(), timeout=idle_timeout
+                            )
+                        except asyncio.TimeoutError:
+                            jlog(
+                                logger,
+                                level="WARN",
+                                event="chat_relay_upstream_idle_timeout",
+                                url=url,
+                            )
+                            break
+                        except StopAsyncIteration:
+                            break
+                        else:
+                            if b"[DONE]" in chunk:
+                                saw_done = True
+                            yield chunk
+                    if not saw_done:
+                        yield b"data: [DONE]\n\n"
 
-                return StreamingResponse(forward(), media_type="text/event-stream")
+                return StreamingResponse(
+                    forward(), media_type="text/event-stream"
+                )
     except httpx.HTTPError as exc:
         jlog(
             logger,
