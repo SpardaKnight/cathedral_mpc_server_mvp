@@ -1,5 +1,14 @@
 # Cathedral Orchestrator – Changelog
 
+## 1.1.3 – 2025-10-26
+- Ensure session update helpers use workspace-aware keys for mutation safety.
+- No surface API or configuration changes.
+
+## 1.1.2 – 2025-10-26
+- Extend session schema to v3.1 with host, health, and Chroma linkage columns and migrate existing databases.
+- Add a background scheduler that prunes idle sessions after 120 minutes without disrupting WAL mode.
+- No surface API changes; status and Supervisor manifests remain compatible.
+
 ## 1.1.1 – 2025-10-26
 - Adjust `/api/status` to expose host catalogs as lists of model identifiers per v3.1.
 - Harden `/health` readiness gating to require an LM client and configured hosts before reporting OK.
