@@ -41,4 +41,25 @@ cd /opt/app
 export PYTHONPATH="/opt/app:${PYTHONPATH:-}"
 
 echo "[INFO] Launching Cathedral Orchestrator"
-exec uvicorn --app-dir /opt/app orchestrator.main:app --host 0.0.0.0 --port 8001
+uvicorn --app-dir /opt/app orchestrator.main:app --host 0.0.0.0 --port 8001 &
+SERVER_PID=$!
+
+for i in $(seq 1 60); do
+  if nc -z 127.0.0.1 8001; then
+    echo "[READY] Cathedral Orchestrator is listening on 8001"
+    break
+  fi
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    wait "$SERVER_PID"
+    exit 1
+  fi
+  sleep 1
+done
+
+if ! nc -z 127.0.0.1 8001; then
+  echo "[ERROR] Cathedral Orchestrator did not open port 8001 within 60 seconds" >&2
+  wait "$SERVER_PID"
+  exit 1
+fi
+
+wait "$SERVER_PID"

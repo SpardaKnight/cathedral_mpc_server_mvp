@@ -1,30 +1,33 @@
 {
   "name": "Cathedral Orchestrator",
+  "version": "0.1.2",
   "slug": "cathedral_orchestrator",
-  "description": "OpenAI-compatible relay + MPC server for Cathedral",
-  "version": "1.1.16",
+  "description": "OpenAI-compatible relay and MPC server for Cathedral. Streams chat, routes sessions, and writes vectors to a single LAN Chroma.",
   "arch": [
     "amd64"
   ],
   "startup": "application",
   "boot": "auto",
   "init": false,
-  "hassio_api": true,
+  "url": "https://github.com/SpardaKnight/cathedral_mpc_server_mvp",
+  "watchdog": "tcp://[HOST]:[PORT:8001]",
   "ports": {
     "8001/tcp": 8001,
     "5005/tcp": 5005
   },
+  "ports_description": {
+    "8001/tcp": "OpenAI relay and admin API",
+    "5005/tcp": "MPC WebSocket"
+  },
+  "hassio_api": true,
+  "homeassistant_api": true,
   "map": [
-    "ssl",
-    "share"
+    "data"
   ],
   "options": {
-    "lm_hosts": [
-      "http://192.168.1.233:1234"
-    ],
+    "lm_hosts": [],
     "chroma_mode": "http",
-    "chroma_url": "http://192.168.1.42:8000",
-    "chroma_persist_dir": "/data/chroma",
+    "chroma_url": "http://127.0.0.1:8000",
     "collection_name": "cathedral",
     "allowed_domains": [
       "light",
@@ -46,9 +49,8 @@
     "lm_hosts": [
       "url"
     ],
-    "chroma_mode": "str",
-    "chroma_url": "str?",
-    "chroma_persist_dir": "str?",
+    "chroma_mode": "list(http)",
+    "chroma_url": "url?",
     "collection_name": "str",
     "allowed_domains": [
       "str"
