@@ -20,16 +20,13 @@ homeassistant_api: true
 map:
   - data
 
-# Default options visible to users
+# Default options users see
 options:
   lm_hosts: []
   chroma_mode: "http"
   chroma_url: "http://127.0.0.1:8000"
   collection_name: "cathedral"
-  allowed_domains:
-    - light
-    - switch
-    - scene
+  allowed_domains: [light, switch, scene]
   temperature: 0.7
   top_p: 0.9
   upserts_enabled: true
@@ -41,15 +38,13 @@ options:
   lock_CHROMA_URL: false
   lock_VECTOR_DB: false
 
-# Validation schema for user options
+# Schema validator
 schema:
-  lm_hosts:
-    - url
-  chroma_mode: "list(http)"
+  lm_hosts: [url]
+  chroma_mode: str
   chroma_url: "url?"
   collection_name: str
-  allowed_domains:
-    - str
+  allowed_domains: [str]
   temperature: float
   top_p: float
   upserts_enabled: bool

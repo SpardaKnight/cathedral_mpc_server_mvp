@@ -49,7 +49,7 @@
     "lm_hosts": [
       "url"
     ],
-    "chroma_mode": "list(http)",
+    "chroma_mode": "str",
     "chroma_url": "url?",
     "collection_name": "str",
     "allowed_domains": [

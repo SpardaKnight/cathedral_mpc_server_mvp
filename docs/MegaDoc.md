@@ -9,7 +9,6 @@ repo root
 ├── README.md                # entrypoint, links to docs/
 ├── cathedral_orchestrator/  # Home Assistant add-on folder
 │   ├── Dockerfile           # Debian bookworm base, venv bootstrap + Supervisor labels
-│   ├── build.json           # Supervisor build metadata (arch, base)
 │   ├── build.yaml           # Supervisor build matrix override for amd64 bookworm
 │   ├── config.yaml          # Supervisor-facing manifest
 │   ├── config.json          # JSON mirror of the manifest
@@ -26,11 +25,13 @@ repo root
 
 `/api/status` merges all configured LM hosts into a single model catalog, reports per-host health, exposes LM/Chroma readiness, and tracks active session counts so operators can confirm routing, host affinity, and Chroma collection provisioning at a glance.
 
+The Home Assistant watchdog is configured for `tcp://[HOST]:[PORT:8001]`. Startup probes block on LM `/v1/models` and Chroma docs until they respond, then verify `nc -z 127.0.0.1 8001` before signalling readiness so Supervisor stays green after restarts.
+
 ## Options Schema (authoritative)
 | Option | Type | Required? | Default | Description | Example |
 | --- | --- | --- | --- | --- | --- |
 | `lm_hosts` | list(url) | Yes | `[]` | Ordered list of language model base URLs. Trailing `/v1` is stripped automatically. | `[]` |
-| `chroma_mode` | enum (`http`) | Yes | `"http"` | HTTP-only mode. Supervisor schema uses `list(http)` to restrict values. | `"http"` |
+| `chroma_mode` | enum (`http`) | Yes | `"http"` | HTTP-only mode. Supervisor schema mirrors this as a string enum. | `"http"` |
 | `chroma_url` | url? | Conditional | `"http://127.0.0.1:8000"` | Remote Chroma endpoint used when `chroma_mode` is `"http"`. | `"http://192.168.1.42:8000"` |
 | `collection_name` | str | Yes | `"cathedral"` | Chroma collection that stores embeddings for the orchestrator. | `"cathedral"` |
 | `allowed_domains` | list(str) | Yes | `["light","switch","scene"]` | Home Assistant domains exposed to MPC tools. | `["light","switch","scene","media_player"]` |
@@ -43,7 +44,7 @@ repo root
 | `lock_LMSTUDIO_BASE_PATH` | bool | Yes | `false` | Blocks MPC auto-config from rewriting the LM Studio base path. | `false` |
 | `lock_EMBEDDING_BASE_PATH` | bool | Yes | `false` | Locks the embedding base path for remote config pushes. | `false` |
 | `lock_CHROMA_URL` | bool | Yes | `false` | Locks the Chroma URL for remote config pushes. | `false` |
-| `lock_VECTOR_DB` | bool | Yes | `false` | Locks vector database selection for remote config pushes. | `false` |
+| `lock_VECTOR_DB` | bool | Yes | `false` | Locks vector database selection and blocks `chroma_mode` rewrites during remote config pushes. | `false` |
 
 Full schema guidance lives in [docs/schemas/ADDON_OPTIONS.md](schemas/ADDON_OPTIONS.md).
 
@@ -69,10 +70,10 @@ Full schema guidance lives in [docs/schemas/ADDON_OPTIONS.md](schemas/ADDON_OPTI
 1. Add the custom repository to Home Assistant: **Settings → Add-ons → Add-on Store → ⋮ → Repositories**. Use `https://github.com/SpardaKnight/cathedral_mpc_server_mvp` (no `.git` suffix).
 2. After adding, select **⋮ → Reload** in the Add-on Store to force a refresh; the store search does not auto-index custom repositories.
 3. Install *Cathedral Orchestrator* from the *Cathedral* section. For private installs, place the repository under `/addons/cathedral_orchestrator` inside the Supervisor file editor and reload the store.
-4. Upgrades follow Supervisor’s version bump. Increment `version` in `config.yaml`/`config.json` when publishing updates; Supervisor rebuilds the container automatically.
+4. Upgrades follow Supervisor’s version bump. Increment `version` in `config.yaml`/`config.json` when publishing updates so the Add-on Store surfaces an Update button and Supervisor rebuilds the container automatically.
 
 ## Build & Base
-* `build.yaml` pins the Supervisor build to `ghcr.io/home-assistant/amd64-debian:bookworm`; `build.json` retains the legacy multi-arch map for reference.
+* `build.yaml` pins the Supervisor build to `ghcr.io/home-assistant/amd64-base-debian:bookworm` as the single source for Supervisor builds.
 * `Dockerfile` creates a virtual environment at `/opt/venv`, installs pinned Python packages (FastAPI, Uvicorn, HTTPX, Chroma, etc.), and copies application sources into `/opt/app/orchestrator`.
 * Supervisor builds images with `docker buildx build` under BuildKit. Operators can mirror the exact invocation (see [operations/smoke-build.md](operations/smoke-build.md)) to confirm the image constructs without running runtime tests.
 

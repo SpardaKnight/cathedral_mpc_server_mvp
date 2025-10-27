@@ -6,7 +6,7 @@ import threading
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -384,47 +384,58 @@ async def reload_clients_from_options(
 async def _refresh_model_catalog() -> None:
     global MODEL_CATALOG, HOST_HEALTH
     hosts = [host.rstrip("/") for host in LM_HOSTS.values()]
-    catalog: Dict[str, List[str]] = {}
-    health: Dict[str, str] = {}
     if not hosts:
         MODEL_CATALOG = {}
         HOST_HEALTH = {}
         jlog(logger, event="model_catalog_empty")
         return
-    for host in hosts:
-        url = f"{host}/v1/models"
-        try:
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(10.0, connect=5.0)
-            ) as client:
-                response = await client.get(url)
-                response.raise_for_status()
-                data = response.json()
-                models: List[str] = []
-                if isinstance(data, dict) and isinstance(data.get("data"), list):
-                    for item in data["data"]:
-                        if isinstance(item, dict):
-                            identifier = item.get("id") or item.get("name")
-                            if identifier:
-                                models.append(str(identifier))
-                catalog[host] = models
-                health[host] = "ok"
-                jlog(
-                    logger,
-                    event="model_catalog_host",
-                    host=host,
-                    models=len(models),
-                )
-        except Exception as exc:  # pragma: no cover - network guard
+
+    client = APP_CLIENTS.get("lm")
+    if client is None:
+        jlog(logger, level="WARN", event="model_catalog_client_missing")
+        return
+
+    tasks = [list_models_from_host(client, host) for host in hosts]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    catalog: Dict[str, List[str]] = {}
+    health: Dict[str, str] = {}
+
+    for host, result in zip(hosts, results):
+        if isinstance(result, BaseException):
             catalog[host] = []
             health[host] = "down"
             jlog(
                 logger,
                 level="WARN",
-                event="model_catalog_fetch_failed",
+                event="model_catalog_gather_failed",
                 host=host,
-                error=str(exc),
+                error=str(result),
             )
+            continue
+
+        base, models_payload = cast(Tuple[str, List[Dict[str, Any]]], result)
+        ids: List[str] = []
+        for item in models_payload:
+            identifier = None
+            if isinstance(item, dict):
+                identifier = item.get("id") or item.get("name")
+            elif isinstance(item, str):
+                identifier = item
+            if identifier:
+                ids.append(str(identifier))
+        key = base.rstrip("/")
+        catalog[key] = ids
+        health_status = "ok" if ids else "down"
+        health[key] = health_status
+        jlog(
+            logger,
+            event="model_catalog_host",
+            host=key,
+            models=len(ids),
+            status=health_status,
+        )
+
     MODEL_CATALOG = catalog
     HOST_HEALTH = health
     jlog(logger, event="model_catalog_refreshed", hosts=len(catalog))
@@ -654,7 +665,25 @@ async def api_set_options(request: Request) -> JSONResponse:
     if not isinstance(body, dict):
         jlog(logger, level="ERROR", event="api_options_invalid_payload")
         return JSONResponse({"ok": False, "error": "invalid_payload"}, status_code=400)
-    merged = {**DEFAULT_OPTIONS, **CURRENT_OPTIONS, **body}
+    lock_map = {
+        "lm_hosts": bool(CURRENT_OPTIONS.get("lock_hosts", False)),
+        "chroma_url": bool(CURRENT_OPTIONS.get("lock_CHROMA_URL", False)),
+        "chroma_mode": bool(CURRENT_OPTIONS.get("lock_VECTOR_DB", False)),
+    }
+
+    filtered_body: Dict[str, Any] = {}
+    for key, value in body.items():
+        if key in lock_map and lock_map[key]:
+            jlog(
+                logger,
+                level="WARN",
+                event="api_options_locked_field",
+                field=key,
+            )
+            continue
+        filtered_body[key] = value
+
+    merged = {**DEFAULT_OPTIONS, **CURRENT_OPTIONS, **filtered_body}
     try:
         validated = OptionsModel.model_validate(merged)
     except ValidationError as exc:
