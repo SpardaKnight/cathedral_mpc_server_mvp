@@ -1,12 +1,17 @@
 ARG BUILD_FROM
 FROM $BUILD_FROM
 
+LABEL \
+  io.hass.version="${BUILD_VERSION}" \
+  io.hass.type="addon" \
+  io.hass.arch="${BUILD_ARCH}"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-venv python3-setuptools python3-wheel \
-    build-essential rustc cargo cmake bash curl jq ca-certificates git && \
+    build-essential rustc cargo cmake bash curl jq ca-certificates git netcat-openbsd && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/app

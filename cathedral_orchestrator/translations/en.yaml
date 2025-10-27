@@ -1,0 +1,41 @@
+configuration:
+  lm_hosts:
+    name: LM hosts
+    description: List of OpenAI-compatible base URLs. Do not include /v1.
+  chroma_mode:
+    name: Chroma mode
+    description: HTTP only. Vectors are stored on a single LAN Chroma server.
+  chroma_url:
+    name: Chroma URL
+    description: HTTP endpoint for the LAN Chroma server.
+  collection_name:
+    name: Default collection
+    description: Base Chroma collection name used by the orchestrator.
+  allowed_domains:
+    name: Allowed HA domains
+    description: ToolBridge allow-list for Home Assistant services.
+  temperature:
+    name: Temperature
+  top_p:
+    name: Top P
+  upserts_enabled:
+    name: Enable upserts
+    description: If false, memory writes are disabled.
+  auto_config:
+    name: Auto-config from AnythingLLM
+  auto_discovery:
+    name: Auto-discover LM hosts
+  lock_hosts:
+    name: Lock LM hosts
+  lock_LMSTUDIO_BASE_PATH:
+    name: Lock LM Studio path
+  lock_EMBEDDING_BASE_PATH:
+    name: Lock embedding path
+  lock_CHROMA_URL:
+    name: Lock Chroma URL
+  lock_VECTOR_DB:
+    name: Lock vector DB
+
+network:
+  "8001/TCP": OpenAI relay and admin API
+  "5005/TCP": MPC WebSocket

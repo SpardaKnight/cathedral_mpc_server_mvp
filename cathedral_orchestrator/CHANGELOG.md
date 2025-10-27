@@ -1,5 +1,11 @@
 # Cathedral Orchestrator – Changelog
 
+## [0.1.2]
+- Align Supervisor manifest defaults with Cathedral Orchestrator v3.1, including `/api/status` telemetry and Chroma provisioning.
+- Expose UI translations and port descriptions for the relay and MPC WebSocket endpoints.
+- Add watchdog health probes and readiness gating to satisfy Supervisor validation.
+- Harden the Debian base with Supervisor build metadata labels for cross-arch builds.
+
 ## [1.1.16]
 - Restore `/v1/chat/completions` to relay through the configured LM host catalog instead of a hardcoded LAN endpoint while retaining raw SSE streaming.
 - Log upstream transport failures as structured 502 errors and keep Authorization forwarding minimal for pass-through compliance.

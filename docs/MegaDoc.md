@@ -8,11 +8,12 @@ Cathedral Orchestrator is the Home Assistant add-on that fronts Cathedral's Open
 repo root
 ├── README.md                # entrypoint, links to docs/
 ├── cathedral_orchestrator/  # Home Assistant add-on folder
-│   ├── Dockerfile           # Debian bookworm base, venv bootstrap
+│   ├── Dockerfile           # Debian bookworm base, venv bootstrap + Supervisor labels
 │   ├── build.json           # Supervisor build metadata (arch, base)
+│   ├── build.yaml           # Supervisor build matrix override for amd64 bookworm
 │   ├── config.yaml          # Supervisor-facing manifest
 │   ├── config.json          # JSON mirror of the manifest
-│   ├── run.sh               # container entrypoint (Supervisor-managed)
+│   ├── translations/        # Add-on UI labels surfaced in Supervisor
 │   └── orchestrator/        # application package (FastAPI + MPC)
 ├── docs/                    # MegaDoc, schema, specs, operations, patch logs
 └── dev/                     # opt-in local environment mirror
@@ -23,22 +24,21 @@ repo root
 * **WebSocket 5005/tcp** – MPC WebSocket server mounted under `/mcp`. Handles Cathedral tool flows and applies the single-writer constraint for automations.
 * **Supervisor APIs** – `/api/options` accepts JSON payloads to hot-apply configuration; `/api/status` surfaces current options for troubleshooting.
 
-`/api/status` merges all configured LM hosts into a single model catalog, reports per-host health, exposes LM/Chroma readiness, and tracks active session counts so operators can confirm routing and memory collection links at a glance.
+`/api/status` merges all configured LM hosts into a single model catalog, reports per-host health, exposes LM/Chroma readiness, and tracks active session counts so operators can confirm routing, host affinity, and Chroma collection provisioning at a glance.
 
 ## Options Schema (authoritative)
 | Option | Type | Required? | Default | Description | Example |
 | --- | --- | --- | --- | --- | --- |
-| `lm_hosts` | list(url) | Yes | `[]` | Ordered list of language model base URLs. Trailing `/v1` is stripped automatically. | `["http://192.168.1.233:1234"]` |
-| `chroma_mode` | str (`"http"`) | Yes | `"http"` | HTTP-only mode. Non-HTTP values are coerced back to `"http"`. | `"http"` |
-| `chroma_url` | str? | Conditional | `"http://127.0.0.1:8000"` | Remote Chroma endpoint used when `chroma_mode` is `"http"`. | `"http://192.168.1.42:8000"` |
-| `chroma_persist_dir` | str? | Optional | `"/data/chroma"` | Legacy option retained for schema parity; ignored by the HTTP client. | `"/data/chroma"` |
+| `lm_hosts` | list(url) | Yes | `[]` | Ordered list of language model base URLs. Trailing `/v1` is stripped automatically. | `[]` |
+| `chroma_mode` | enum (`http`) | Yes | `"http"` | HTTP-only mode. Supervisor schema uses `list(http)` to restrict values. | `"http"` |
+| `chroma_url` | url? | Conditional | `"http://127.0.0.1:8000"` | Remote Chroma endpoint used when `chroma_mode` is `"http"`. | `"http://192.168.1.42:8000"` |
 | `collection_name` | str | Yes | `"cathedral"` | Chroma collection that stores embeddings for the orchestrator. | `"cathedral"` |
 | `allowed_domains` | list(str) | Yes | `["light","switch","scene"]` | Home Assistant domains exposed to MPC tools. | `["light","switch","scene","media_player"]` |
 | `temperature` | float | Yes | `0.7` | Default sampling temperature applied to LM Studio compatible hosts. | `0.6` |
 | `top_p` | float | Yes | `0.9` | Default nucleus sampling value passed through to upstream models. | `0.85` |
 | `upserts_enabled` | bool | Yes | `true` | Enables real-time embedding upserts to Chroma. Disable to operate in read-only replay mode. | `false` |
 | `auto_config` | bool | Yes | `true` | Allows MPC auto-configuration to hot-apply LM/Chroma settings from AnythingLLM. | `true` |
-| `auto_discovery` | bool | Yes | `false` | Reserved toggle for LAN discovery of LM hosts. Currently no-op. | `false` |
+| `auto_discovery` | bool | Yes | `false` | Enables LAN LM host discovery and merges unlocked hosts into the catalog automatically. | `true` |
 | `lock_hosts` | bool | Yes | `false` | Prevents remote updates from altering `lm_hosts`. | `false` |
 | `lock_LMSTUDIO_BASE_PATH` | bool | Yes | `false` | Blocks MPC auto-config from rewriting the LM Studio base path. | `false` |
 | `lock_EMBEDDING_BASE_PATH` | bool | Yes | `false` | Locks the embedding base path for remote config pushes. | `false` |
@@ -48,7 +48,7 @@ repo root
 Full schema guidance lives in [docs/schemas/ADDON_OPTIONS.md](schemas/ADDON_OPTIONS.md).
 
 ## Chroma Mode
-* **HTTP mode only**: vectors are proxied to the remote Chroma deployment identified by `chroma_url`. The orchestrator proactively creates the configured collection when options change or sessions bootstrap and records the collection ID alongside each MPC session.
+* **HTTP mode only**: vectors are proxied to the remote Chroma deployment identified by `chroma_url`. The orchestrator proactively creates the configured collection when options change or sessions bootstrap and records the collection ID alongside each MPC session. Session host affinity keeps MPC clients bound to their assigned LM host, and `/api/status` reflects host health, catalog entries, and active sessions for operators.
 
 ## LM Studio Contract
 * Provide base URLs **without** `/v1` in the add-on options. The orchestrator appends `/v1/...` when routing embeddings and model discovery requests; chat completions stream through the first configured LM host using the same async pass-through so Server-Sent Events reach AnythingLLM unchanged.
@@ -72,7 +72,7 @@ Full schema guidance lives in [docs/schemas/ADDON_OPTIONS.md](schemas/ADDON_OPTI
 4. Upgrades follow Supervisor’s version bump. Increment `version` in `config.yaml`/`config.json` when publishing updates; Supervisor rebuilds the container automatically.
 
 ## Build & Base
-* `build.json` pins the add-on to Debian Bookworm via `ghcr.io/home-assistant/amd64-debian:bookworm`.
+* `build.yaml` pins the Supervisor build to `ghcr.io/home-assistant/amd64-debian:bookworm`; `build.json` retains the legacy multi-arch map for reference.
 * `Dockerfile` creates a virtual environment at `/opt/venv`, installs pinned Python packages (FastAPI, Uvicorn, HTTPX, Chroma, etc.), and copies application sources into `/opt/app/orchestrator`.
 * Supervisor builds images with `docker buildx build` under BuildKit. Operators can mirror the exact invocation (see [operations/smoke-build.md](operations/smoke-build.md)) to confirm the image constructs without running runtime tests.
 

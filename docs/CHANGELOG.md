@@ -1,5 +1,12 @@
 # Cathedral Orchestrator Docs Changelog
 
+## 0.1.2
+- Home Assistant add-on manifest aligned with Supervisor schema.
+- `/api/status` inventory and host health surfaced in UI.
+- SSE relay hardening and guaranteed [DONE] terminator retained.
+- MPC scopes `resources.list` and `resources.health` exposed.
+- Session host affinity and Chroma collection provisioning confirmed.
+
 ## 0.1.1
 - Captured schema correction for `lm_hosts` (`list(url)`) and aligned YAML/JSON manifests.
 - Documented migration to Debian Bookworm base image and `/opt/venv` install strategy.
