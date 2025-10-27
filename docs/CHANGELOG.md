@@ -1,11 +1,11 @@
 # Cathedral Orchestrator Docs Changelog
 
 ## 0.1.2
-- Home Assistant add-on manifest aligned with Supervisor schema.
-- `/api/status` inventory and host health surfaced in UI.
-- SSE relay hardening and guaranteed [DONE] terminator retained.
-- MPC scopes `resources.list` and `resources.health` exposed.
-- Session host affinity and Chroma collection provisioning confirmed.
+- Home Assistant add-on manifest mirrored in YAML/JSON with tcp watchdog, port descriptions, and version bump guidance for store updates.
+- `/api/status` documented with readiness flags, catalog export, and per-host health telemetry.
+- SSE relay contract reiterated with enforced `text/event-stream` and synthetic `[DONE]` frame handling.
+- MPC scopes `resources.list`/`resources.health` highlighted alongside host assignment and Chroma collection persistence.
+- `/api/options` locking notes updated so `chroma_mode` remains protected when `lock_VECTOR_DB` is enabled.
 
 ## 0.1.1
 - Captured schema correction for `lm_hosts` (`list(url)`) and aligned YAML/JSON manifests.

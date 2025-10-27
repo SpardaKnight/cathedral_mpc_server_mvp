@@ -1,10 +1,11 @@
 # Cathedral Orchestrator – Changelog
 
 ## [0.1.2]
-- Align Supervisor manifest defaults with Cathedral Orchestrator v3.1, including `/api/status` telemetry and Chroma provisioning.
-- Expose UI translations and port descriptions for the relay and MPC WebSocket endpoints.
-- Add watchdog health probes and readiness gating to satisfy Supervisor validation.
-- Harden the Debian base with Supervisor build metadata labels for cross-arch builds.
+- Align Supervisor manifests (YAML + JSON) with Home Assistant schema, including the tcp watchdog target and port descriptions.
+- Refresh build metadata to use the Supervisor Debian base with standard addon labels for cross-arch visibility.
+- Gate startup on LM/Chroma probes, expose readiness telemetry via `/api/status` and `/health`, and auto-create the Chroma collection when ready.
+- Expand UI translations with configuration guidance and surface network labels for the relay and MPC WebSocket ports.
+- Correct `/api/options` locking so `chroma_mode` obeys the `lock_VECTOR_DB` guard when auto-config pushes occur.
 
 ## [1.1.16]
 - Restore `/v1/chat/completions` to relay through the configured LM host catalog instead of a hardcoded LAN endpoint while retaining raw SSE streaming.
