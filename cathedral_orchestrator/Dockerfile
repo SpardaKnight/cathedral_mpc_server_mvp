@@ -29,7 +29,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
       websockets==12.0 \
       uvloop==0.19.0 \
       httptools==0.6.1 \
-      aiosqlite==0.20.0
+      aiosqlite==0.20.0 \
+      PyYAML==6.0.1
 # No chromadb here. Chroma is external over HTTP.
 
 COPY rootfs/ /
