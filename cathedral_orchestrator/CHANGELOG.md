@@ -1,5 +1,8 @@
 # Cathedral Orchestrator – Changelog
 
+## [0.1.8]
+- Bump manifests to 0.1.8 so Supervisor surfaces the AnythingLLM skill and Chroma client fixes.
+
 ## [0.1.7]
 - Prefer Chroma API v2 with structured fallbacks to v1 while preserving proactive collection ensure and logging.
 - Update the AnythingLLM MPC bridge skill to expose runtime.handler and entrypoint params for Agent compatibility.
