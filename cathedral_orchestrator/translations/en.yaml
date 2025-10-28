@@ -44,6 +44,12 @@ configuration:
   lock_VECTOR_DB:
     name: Lock vector DB
     description: Prevent DB target changes
+  auto_config_active:
+    name: Auto-config active
+    description: Status mirror. Read-only indicator of current auto-config state.
+  upserts_active:
+    name: Upserts active
+    description: Status mirror. Read-only indicator of current memory upsert state.
 
 network:
   "8001/TCP": OpenAI relay and admin API

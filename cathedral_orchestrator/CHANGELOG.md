@@ -1,5 +1,12 @@
 # Cathedral Orchestrator – Changelog
 
+## [0.1.3]
+- Fix `/v1/chat/completions` to stream with a true SSE pass-through using `aiter_raw`, forward Authorization, and guarantee `[DONE]` on silent upstream termination.
+- Unify upstream base selection with the same routing used for model listing so the relay honors the configured LM host catalog.
+- Expose `auto_config_active` and `upserts_active` in the add-on UI for operator visibility.
+- Ensure `chroma_mode` respects `lock_VECTOR_DB` in `/api/options`.
+- Bump add-on version so Supervisor surfaces the update reliably.
+
 ## [0.1.2]
 - Align Supervisor manifests (YAML + JSON) with Home Assistant schema, including the tcp watchdog target and port descriptions.
 - Refresh build metadata to use the Supervisor Debian base with standard addon labels for cross-arch visibility.
