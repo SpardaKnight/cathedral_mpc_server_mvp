@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple, cast
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.responses import PlainTextResponse  # noqa: F401
 
 from pydantic import BaseModel, Field, ValidationError
@@ -62,35 +62,71 @@ def persist_options_to_disk(options: Dict[str, Any]) -> None:
         raise
 
 
+def _strip_v1_suffix(url: str) -> str:
+    """Remove trailing /v1 or /v1/ from a base URL."""
+    u = url.rstrip("/")
+    if u.lower().endswith("/v1"):
+        u = u[:-3]
+    return u
+
+
 def _normalize_lm_hosts(raw: Any) -> Dict[str, str]:
-    def _clean(url: str) -> str:
-        value = (url or "").strip().rstrip("/")
-        return value[:-3] if value.endswith("/v1") else value
-
+    """
+    Accepts list[str] or dict[str, str]. Returns dict[id->base] where base has no trailing slash
+    and never includes '/v1'. Keys are stable UUID-like labels when source lacks keys.
+    """
+    out: Dict[str, str] = {}
     if isinstance(raw, dict):
-        return {name: _clean(url) for name, url in raw.items() if url}
-    if isinstance(raw, list):
-        return {
-            f"host_{index + 1}": _clean(url) for index, url in enumerate(raw) if url
-        }
-    if isinstance(raw, str) and raw:
-        return {"primary": _clean(raw)}
-    return {}
+        for k, v in raw.items():
+            if not isinstance(v, str):
+                continue
+            base = _strip_v1_suffix(v).rstrip("/")
+            if base:
+                out[str(k)] = base
+    elif isinstance(raw, list):
+        for v in raw:
+            if not isinstance(v, str):
+                continue
+            base = _strip_v1_suffix(v).rstrip("/")
+            if base:
+                out[str(uuid.uuid4())] = base
+    elif isinstance(raw, str) and raw:
+        base = _strip_v1_suffix(raw).rstrip("/")
+        if base:
+            out["primary"] = base
+    return out
 
 
-async def list_models_from_host(
-    client: httpx.AsyncClient, base: str
-) -> Tuple[str, List[Dict[str, Any]]]:
-    url = base.rstrip("/") + "/v1/models"
-    try:
-        response = await client.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        models = data.get("data", [])
-        return base, models if isinstance(models, list) else []
-    except Exception as exc:  # pragma: no cover - network guard
-        jlog(logger, level="WARN", event="lm_models_fail", host=base, error=str(exc))
-        return base, []
+async def list_models_from_host(client: httpx.AsyncClient, base: str) -> Tuple[str, List[Dict[str, Any]]]:
+    """
+    Query <base>/v1/models and return the raw 'data' list items unmodified.
+    This preserves LM Studio metadata (e.g., context_length) for UI auto-detection.
+    """
+    base_clean = base.rstrip("/")
+    url = f"{base_clean}/v1/models"
+    resp = await client.get(
+        url,
+        headers={"Accept": "application/json"},
+        follow_redirects=True,
+        timeout=httpx.Timeout(connect=10, read=20),
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+    items: List[Dict[str, Any]] = []
+    if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+        for it in payload["data"]:
+            if isinstance(it, dict):
+                items.append(dict(it))
+            elif isinstance(it, str):
+                items.append({"id": str(it), "object": "model"})
+    jlog(
+        logger,
+        level="DEBUG",
+        event="lm_models_fetched",
+        host=base_clean,
+        models=len(items),
+    )
+    return base_clean, items
 
 
 def build_model_index(
@@ -131,9 +167,24 @@ class HostPool:
             jlog(logger, level="DEBUG", event="hostpool_refresh", hosts=0)
             return {}
 
-        tasks = [list_models_from_host(client, base) for base in self._hosts.values()]
-        results = await asyncio.gather(*tasks)
-        catalog = {base: models for base, models in results}
+        bases = list(self._hosts.values())
+        tasks = [list_models_from_host(client, base) for base in bases]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        catalog: Dict[str, List[Dict[str, Any]]] = {}
+        for base, result in zip(bases, results):
+            base_key = base.rstrip("/")
+            if isinstance(result, BaseException):
+                catalog[base_key] = []
+                jlog(
+                    logger,
+                    level="WARN",
+                    event="hostpool_refresh_failed",
+                    host=base_key,
+                    error=str(result),
+                )
+                continue
+            real_base, models = cast(Tuple[str, List[Dict[str, Any]]], result)
+            catalog[real_base.rstrip("/")] = models
         async with self._lock:
             self._catalog = catalog
         counts = {base: len(models) for base, models in catalog.items()}
@@ -392,37 +443,42 @@ async def _refresh_model_catalog() -> None:
         jlog(logger, level="WARN", event="model_catalog_client_missing")
         return
 
-    tasks_v1 = [list_models_from_host(client, host) for host in hosts]
-    # Try to harvest LM Studio metadata for context_length/max_context_length
-    tasks_v0 = [fetch_lmstudio_model_meta(client, host) for host in hosts]
-    results_v1 = await asyncio.gather(*tasks_v1, return_exceptions=True)
-    results_v0 = await asyncio.gather(*tasks_v0, return_exceptions=True)
+    tasks = [list_models_from_host(client, host) for host in hosts]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
+    # Try to harvest LM Studio metadata for context_length/max_context_length
+    meta_tasks = [fetch_lmstudio_model_meta(client, host) for host in hosts]
+    meta_results = await asyncio.gather(*meta_tasks, return_exceptions=True)
+
+    # Keep a compact readiness catalog of IDs, but do not lose the full objects at the API layer.
     catalog: Dict[str, List[str]] = {}
     health: Dict[str, str] = {}
     meta_by_host: Dict[str, Dict[str, Dict[str, Any]]] = {}
-    for base, meta_result in zip(hosts, results_v0):
+
+    for host, meta_result in zip(hosts, meta_results):
+        host_key = host.rstrip("/")
         if isinstance(meta_result, BaseException):
-            meta_by_host[base] = {}
+            meta_by_host[host_key] = {}
             jlog(
                 logger,
                 level="WARN",
                 event="lmstudio_meta_gather_failed",
-                host=base,
+                host=host_key,
                 error=str(meta_result),
             )
         else:
-            meta_by_host[base] = meta_result or {}
+            meta_by_host[host_key] = meta_result or {}
 
-    for host, result in zip(hosts, results_v1):
+    for host, result in zip(hosts, results):
+        host_key = host.rstrip("/")
         if isinstance(result, BaseException):
-            catalog[host] = []
-            health[host] = "down"
+            catalog[host_key] = []
+            health[host_key] = "down"
             jlog(
                 logger,
                 level="WARN",
                 event="model_catalog_gather_failed",
-                host=host,
+                host=host_key,
                 error=str(result),
             )
             continue
@@ -430,13 +486,12 @@ async def _refresh_model_catalog() -> None:
         base, models_payload = cast(Tuple[str, List[Dict[str, Any]]], result)
         ids: List[str] = []
         for item in models_payload:
-            identifier = None
             if isinstance(item, dict):
-                identifier = item.get("id") or item.get("name")
-            elif isinstance(item, str):
-                identifier = item
-            if identifier:
-                ids.append(str(identifier))
+                mid = item.get("id") or item.get("name")
+            else:
+                mid = str(item)
+            if mid:
+                ids.append(str(mid))
         key = base.rstrip("/")
         catalog[key] = ids
         health_status = "ok" if ids else "down"
@@ -811,36 +866,46 @@ async def api_set_options(request: Request) -> JSONResponse:
 
 
 @app.get("/v1/models")
-async def models_v1(_request: Request):
-    catalog = await _catalog_provider()
-    union: List[Dict[str, Any]] = []
-    now = int(datetime.utcnow().timestamp())
-    for host, models in catalog.items():
-        per_host_meta = MODEL_META.get(host.rstrip("/"), {}) if isinstance(MODEL_META, dict) else {}
-        for mid in models:
-            entry: Dict[str, Any] = {
-                "id": mid,
-                "object": "model",
-                "owned_by": "upstream",
-                "created": now,
-            }
-            meta = per_host_meta.get(mid)
-            if isinstance(meta, dict):
-                if "context_length" in meta:
-                    entry["context_length"] = int(meta["context_length"])
-                    entry["max_context_length"] = int(meta["context_length"])
-                    entry["max_input_tokens"] = int(meta["context_length"])
-                    entry["context_window"] = int(meta["context_length"])
-                if "embedding_length" in meta:
-                    entry["embedding_length"] = int(meta["embedding_length"])
-            union.append(entry)
+async def models_v1(_request: Request) -> JSONResponse:
+    if not LM_HOSTS:
+        raise HTTPException(status_code=503, detail="no lm hosts configured")
+    client = APP_CLIENTS.get("lm")
+    if client is None:
+        raise HTTPException(status_code=503, detail="client not ready")
+    bases = list(LM_HOSTS.values())
+    tasks = [list_models_from_host(client, base) for base in bases]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    seen: set[str] = set()
+    aggregated: List[Dict[str, Any]] = []
+    failures = 0
+    for base, res in zip(bases, results):
+        if isinstance(res, BaseException):
+            failures += 1
+            jlog(
+                logger,
+                level="WARN",
+                event="models_v1_upstream_failed",
+                host=base.rstrip("/"),
+                error=str(res),
+            )
+            continue
+        _, items = cast(Tuple[str, List[Dict[str, Any]]], res)
+        for obj in items:
+            mid = str(obj.get("id") or obj.get("name") or "") if isinstance(obj, dict) else str(obj)
+            if not mid:
+                continue
+            if mid in seen:
+                continue
+            aggregated.append(obj)
+            seen.add(mid)
     jlog(
         logger,
-        event="models_v1_union",
-        hosts=len(catalog),
-        models=len(union),
+        event="models_v1_passthrough",
+        hosts=len(bases),
+        models=len(aggregated),
+        failures=failures,
     )
-    return JSONResponse({"object": "list", "data": union})
+    return JSONResponse({"object": "list", "data": aggregated})
 
 
 @app.get("/api/v0/models")
@@ -903,15 +968,65 @@ async def models_v0_aggregate(_request: Request):
     return JSONResponse({"loaded": loaded, "downloaded": []})
 
 
+@app.head("/v1/models")
+async def models_v1_head() -> Response:
+    """
+    Lightweight provider probe. Return 200 if at least one LM host responds to /v1/models.
+    """
+    if not LM_HOSTS:
+        raise HTTPException(status_code=503, detail="no lm hosts configured")
+    client = APP_CLIENTS.get("lm")
+    if client is None:
+        raise HTTPException(status_code=503, detail="client not ready")
+    for base in LM_HOSTS.values():
+        try:
+            host = base.rstrip("/")
+            resp = await client.get(f"{host}/v1/models", timeout=5)
+            if resp.status_code == 200:
+                jlog(logger, event="models_v1_head_ok", host=host)
+                return Response(status_code=200)
+            jlog(
+                logger,
+                level="DEBUG",
+                event="models_v1_head_non_200",
+                host=host,
+                status=int(resp.status_code),
+            )
+        except Exception as exc:
+            jlog(
+                logger,
+                level="WARN",
+                event="models_v1_head_failed",
+                host=base.rstrip("/"),
+                error=str(exc),
+            )
+            continue
+    jlog(logger, level="WARN", event="models_v1_head_unavailable")
+    raise HTTPException(status_code=503, detail="no upstream models endpoint")
+
+
 async def _route_for_model(model: str) -> str:
     client = APP_CLIENTS.get("lm")
     if not client:
         raise HTTPException(status_code=503, detail="client not ready")
     if not LM_HOSTS:
         raise HTTPException(status_code=503, detail="no lm hosts configured")
-    tasks = [list_models_from_host(client, base) for base in LM_HOSTS.values()]
-    results = await asyncio.gather(*tasks)
-    index = build_model_index(results)
+    bases = list(LM_HOSTS.values())
+    tasks = [list_models_from_host(client, base) for base in bases]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    filtered: List[Tuple[str, List[Dict[str, Any]]]] = []
+    for base, result in zip(bases, results):
+        if isinstance(result, BaseException):
+            jlog(
+                logger,
+                level="WARN",
+                event="route_for_model_failed",
+                host=base.rstrip("/"),
+                error=str(result),
+            )
+            continue
+        filtered.append(cast(Tuple[str, List[Dict[str, Any]]], result))
+    index = build_model_index(filtered)
     try:
         return index[model]
     except KeyError:

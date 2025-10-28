@@ -1,5 +1,11 @@
 # Cathedral Orchestrator – Changelog
 
+## [0.2.2]
+- Preserve LM Studio model metadata by proxying `/v1/models` unmodified and add `HEAD /v1/models` for provider probing.
+- Normalize LM host entries by auto-stripping `/v1` and trailing slashes so entered URLs always resolve.
+- This restores AnythingLLM “Auto-detected from model” behavior (context window, max tokens) and stabilizes model loading.
+- Bump manifests to 0.2.2 so Home Assistant surfaces the release above 0.2.1.
+
 ## [0.2.1]
 - Enrich `/v1/models` with LM Studio-provided context and embedding metadata so UIs auto-detect maximum tokens instead of
   assuming 4k defaults.
