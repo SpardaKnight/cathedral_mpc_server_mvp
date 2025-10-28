@@ -1,12 +1,12 @@
 # Cathedral Orchestrator – Changelog
 
 ## [0.1.6]
-- Restore AnythingLLM @agent flows by implementing `agents.*` with a stable schema including `params`, and advertise capabilities in the handshake.
-- Normalize `resources.list` to return the model catalog under both `catalog` and `hosts` keys for client compatibility.
-- Fix Chroma re-embed after unload by making `ensure_collection` v2-first with robust v1 fallback and redirect handling.
-- Replace the background prune path with a synchronous SQLite deletion inside the pruner thread to eliminate “threads can only be started once.”
-- Retain the 0.1.4 SSE relay hardening and `[DONE]` sentinel guarantee.
-- Bump add-on manifests to 0.1.6 so Supervisor surfaces the update.
+- Restore AnythingLLM @agent flows by implementing agents.* with a stable schema including params, and advertise capabilities in the handshake.
+- Normalize resources.list to return the model catalog under both catalog and hosts.
+- Fix Chroma re-embed after unload by making ensure_collection v2-first with robust v1 fallback and redirect handling.
+- Replace the background prune path with a synchronous SQLite deletion inside the pruner thread to eliminate pruner thread exceptions.
+- Retain the 0.1.4 SSE relay hardening and [DONE] guarantee.
+- Bump manifests to 0.1.6.
 
 ## [0.1.5]
 - Restore MPC `agents.*` surface and advertise capabilities in the handshake.

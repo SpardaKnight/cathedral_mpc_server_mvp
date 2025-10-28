@@ -760,11 +760,9 @@ async def _route_for_model(model: str) -> str:
 
 @app.post("/v1/chat/completions")
 async def relay_chat_completions(request: Request):
-    # Require at least one configured LM host
     if not LM_HOSTS:
         raise HTTPException(status_code=503, detail="no lm hosts configured")
 
-    # Read body once for upstream reuse
     body_bytes = await request.body()
     model: Optional[str] = None
     if body_bytes:
@@ -775,11 +773,9 @@ async def relay_chat_completions(request: Request):
         except Exception:
             model = None
 
-    # Select upstream base using the same routing logic as model listing
     target_base = await _route_for_model(model) if model else list(LM_HOSTS.values())[0]
     url = f"{target_base.rstrip('/')}/v1/chat/completions"
 
-    # Forward minimal headers for SSE
     fwd_headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
     auth = request.headers.get("authorization")
     if auth:
@@ -787,6 +783,7 @@ async def relay_chat_completions(request: Request):
 
     async def stream_sse():
         saw_done = False
+        started = False
         try:
             async with httpx.AsyncClient(timeout=None) as client:
                 async with client.stream("POST", url, headers=fwd_headers, content=body_bytes) as upstream:
@@ -797,17 +794,19 @@ async def relay_chat_completions(request: Request):
                         if chunk:
                             if b"[DONE]" in chunk:
                                 saw_done = True
+                            started = True
                             yield chunk
         except httpx.StreamClosed:
-            # Treat as clean EOF from upstream
+            # Clean EOF from upstream
             pass
         except httpx.HTTPError as exc:
             jlog(logger, level="ERROR", event="chat_relay_upstream_error", url=url, error=str(exc))
-            # Propagate a 502 after the response starts would raise, so only raise before yield
-            raise HTTPException(status_code=502, detail="upstream_http_error") from exc
+            if not started:
+                # Only error before any bytes were streamed
+                raise HTTPException(status_code=502, detail="upstream_http_error") from exc
         finally:
             if not saw_done and not await request.is_disconnected():
-                # Guarantee OpenAI-style terminator for clients that expect it
+                # OpenAI-style terminator
                 yield b"data: [DONE]\n\n"
 
     return StreamingResponse(stream_sse(), media_type="text/event-stream")

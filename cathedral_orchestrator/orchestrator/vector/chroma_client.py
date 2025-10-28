@@ -221,8 +221,14 @@ class ChromaClient:
                         collection_id=cid,
                     )
                     return str(cid)
-        except Exception:
-            pass
+        except Exception as exc:
+            jlog(
+                logger,
+                level="WARN",
+                event="chroma_collection_lookup_failed_v1",
+                name=target,
+                error=str(exc),
+            )
         try:
             url = f"{self._v1_base(base)}/collections"
             resp = await self._client.post(
