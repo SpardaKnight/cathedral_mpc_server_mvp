@@ -1,5 +1,10 @@
 # Cathedral Orchestrator – Changelog
 
+## [0.2.9]
+- Make `/v1/models` strict pass-through with no schema mutation.
+- Provide `/api/models/metadata` that merges `/api/v0/models` `max_context_length` without altering `/v1/models`.
+- Remove default context values in normalization to avoid misleading clients.
+
 ## [0.2.8]
 - Restore an explicit `Timeout(None)` on the LM AsyncClient to guarantee streaming relays never inherit a five-second default timeout while retaining connection pooling limits.
 - Keep LM catalog aggregation and probe requests bounded with the 4-field timeouts introduced in 0.2.7.

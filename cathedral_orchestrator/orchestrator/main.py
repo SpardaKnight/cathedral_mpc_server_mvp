@@ -32,6 +32,21 @@ OPTIONS_LOCK = asyncio.Lock()
 MODEL_OBJECTS: Dict[str, List[Dict[str, Any]]] = {}
 
 
+def _normalize_model_token_limits(model: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(model)
+    context_window = normalized.get("context_window")
+    max_tokens = normalized.get("max_tokens")
+    if context_window is not None:
+        normalized["context_window"] = context_window
+    else:
+        normalized.pop("context_window", None)
+    if max_tokens is not None:
+        normalized["max_tokens"] = max_tokens
+    else:
+        normalized.pop("max_tokens", None)
+    return normalized
+
+
 def _normalize_lm_hosts(raw: Any) -> Dict[str, str]:
     """
     Accepts list[str] or dict[str,str]; returns dict of clean base URLs without '/v1'.
@@ -81,6 +96,7 @@ def persist_options_to_disk(options: Dict[str, Any]) -> None:
         jlog(logger, level="ERROR", event="options_write_failed", error=str(exc))
         print(f"[orchestrator] Failed to persist options: {exc}")
         raise
+
 async def list_models_from_host(client: httpx.AsyncClient, base: str) -> Tuple[str, List[Dict[str, Any]]]:
     """
     Query <base>/v1/models and return the raw 'data' list items unmodified.
@@ -815,7 +831,7 @@ async def models_v1(_request: Request) -> JSONResponse:
             if not mid or mid in seen:
                 continue
             seen.add(mid)
-            # Do not mutate upstream payload; shallow copy in case we annotate later
+            # Preserve upstream payload shape without mutation
             union.append(dict(obj))
     return JSONResponse({"object": "list", "data": union})
 
@@ -898,6 +914,94 @@ async def models_v0_aggregate(_request: Request):
         loaded=len(loaded),
     )
     return JSONResponse({"loaded": loaded, "downloaded": []})
+
+
+@app.get("/api/models/metadata")
+async def models_metadata() -> JSONResponse:
+    """
+    Returns model metadata merged from /v1/models and LM Studio /api/v0/models.
+    Never alters /v1/models. Values are best-effort and optional.
+    """
+    client = APP_CLIENTS.get("lm")
+    if client is None:
+        raise HTTPException(status_code=503, detail="client not ready")
+    hosts = list(LM_HOSTS.values())
+    # 1) Pull native metadata with max_context_length
+    v0: Dict[str, Dict[str, Any]] = {}
+    for base in hosts:
+        url = base.rstrip("/") + "/api/v0/models"
+        try:
+            resp = await client.get(
+                url,
+                follow_redirects=True,
+                timeout=httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0),
+            )
+            resp.raise_for_status()
+            payload = resp.json() or {}
+            for item in payload.get("data", []):
+                mid = item.get("id") or item.get("name")
+                if not mid:
+                    continue
+                # prefer explicit LM Studio v0 fields
+                meta = {
+                    "id": mid,
+                    "type": item.get("type"),
+                    "max_context_length": item.get("max_context_length"),
+                    "state": item.get("state"),
+                    "publisher": item.get("publisher"),
+                    "arch": item.get("arch"),
+                    "quantization": item.get("quantization"),
+                }
+                v0[mid] = meta
+        except Exception as exc:
+            jlog(
+                logger,
+                level="WARN",
+                event="models_v0_fetch_failed",
+                host=base.rstrip("/"),
+                error=str(exc),
+            )
+
+    # 2) Pull /v1/models for currently loaded models and preserve shape
+    union: Dict[str, Dict[str, Any]] = {}
+    bases = list(LM_HOSTS.values())
+    results = await asyncio.gather(
+        *[list_models_from_host(client, b) for b in bases],
+        return_exceptions=True,
+    )
+    for base, res in zip(bases, results):
+        if isinstance(res, BaseException):
+            jlog(
+                logger,
+                level="WARN",
+                event="models_v1_source_failed",
+                host=base.rstrip("/"),
+                error=str(res),
+            )
+            continue
+        _host, items = res
+        for obj in items:
+            if not isinstance(obj, dict):
+                continue
+            mid = obj.get("id") or obj.get("name")
+            if not mid:
+                continue
+            # merge v0 meta into a copy without changing the v1 object
+            merged = dict(obj)
+            v0meta = v0.get(mid) or {}
+            if v0meta.get("max_context_length") is not None:
+                try:
+                    merged["max_context_length"] = int(v0meta["max_context_length"])
+                except (TypeError, ValueError):
+                    pass
+            # do not add guessed defaults
+            merged = _normalize_model_token_limits(merged)
+            union[mid] = merged
+
+    # 3) Emit a compact list
+    data = list(union.values())
+    jlog(logger, event="models_metadata_union", hosts=len(bases), models=len(data))
+    return JSONResponse({"object": "list", "data": data})
 
 
 @app.head("/v1/models")
