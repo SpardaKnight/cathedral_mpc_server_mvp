@@ -10,7 +10,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 import httpx
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from . import sessions
+from . import persona_manager, sessions, voice_proxy
 from .logging_config import jlog, setup_logging
 from .toolbridge import ToolBridge
 from .vector.chroma_client import ChromaClient
@@ -27,6 +27,7 @@ HANDLED_SCOPES = (
     "sampling.*",
     "resources.*",
     "agents.*",
+    "voice.*",
     "cathedral.*",
 )
 
@@ -144,7 +145,6 @@ class MPCServer:
         self, scope: str, workspace_id: Optional[str]
     ) -> Dict[str, Any]:
         """Return Cathedral agent metadata for MCP agent discovery."""
-        # Provide a stable 'params' shape — some UIs expect the key to exist.
         agent_record = {
             "id": "cathedral",
             "name": "Cathedral",
@@ -159,14 +159,20 @@ class MPCServer:
             },
             "metadata": {
                 "workspace_id": workspace_id or "default",
-                "version": "0.1.6",
+                "version": "0.1.9",
             },
         }
 
         if scope == "agents.list":
-            payload: Dict[str, Any] = {"agents": [agent_record]}
+            personas = sorted(persona_manager.list_personas().keys())
+            payload: Dict[str, Any] = {
+                "agents": [agent_record],
+                "personas": personas,
+            }
         elif scope in {"agents.get", "agents.describe"}:
             payload = {"agent": agent_record}
+        elif scope == "agents.resurrect":
+            payload = {}
         else:
             payload = {}
 
@@ -178,6 +184,29 @@ class MPCServer:
             keys=list(payload.keys()),
         )
         return payload
+
+    async def _handle_voice(self, msg: Dict[str, Any]) -> Dict[str, Any]:
+        text = (
+            msg.get("text")
+            or msg.get("content")
+            or (msg.get("body") or {}).get("text")
+            or (msg.get("payload") or {}).get("text")
+        )
+        if not text:
+            jlog(logger, level="ERROR", event="mpc_voice_missing_text")
+            return {"ok": False, "error": "text_required"}
+        audio = await voice_proxy.synthesize(str(text))
+        if not audio:
+            jlog(logger, level="ERROR", event="mpc_voice_synthesis_failed")
+            return {"ok": False, "error": "synthesis_failed"}
+        import base64
+
+        encoded = base64.b64encode(audio).decode("ascii")
+        jlog(logger, event="mpc_voice_synthesized", bytes=len(audio))
+        return {
+            "ok": True,
+            "audio": {"format": "pcm", "data": encoded},
+        }
 
     async def _handle_resources(self) -> Dict[str, Any]:
         """Expose the model catalog under both catalog and hosts for client compatibility."""
@@ -222,10 +251,28 @@ class MPCServer:
                         res = {"ok": True, "body": body}
                     elif scope and scope.startswith("agents."):
                         workspace_id = msg.get("workspace_id")
-                        res = {
-                            "ok": True,
-                            "body": await self._handle_agents(scope, workspace_id),
-                        }
+                        if scope == "agents.resurrect":
+                            persona_id = (
+                                msg.get("persona_id")
+                                or (msg.get("body") or {}).get("persona_id")
+                            )
+                            ok = bool(persona_id) and persona_manager.reset(
+                                str(persona_id)
+                            )
+                            res = {
+                                "ok": ok,
+                                "body": {
+                                    "persona_id": persona_id,
+                                    "reset": ok,
+                                },
+                            }
+                        else:
+                            res = {
+                                "ok": True,
+                                "body": await self._handle_agents(scope, workspace_id),
+                            }
+                    elif scope and scope.startswith("voice."):
+                        res = await self._handle_voice(msg)
                     elif scope and scope.startswith(
                         (
                             "config.",
@@ -268,7 +315,17 @@ class MPCServer:
         if action == "create":
             conversation_id = msg.get("conversation_id")
             user_id = msg.get("user_id")
-            persona_id = msg.get("persona_id")
+            persona_id = msg.get("persona_id") or "default"
+            persona_payload = persona_manager.get(persona_id)
+            if persona_payload is None:
+                jlog(
+                    logger,
+                    level="WARN",
+                    event="mpc_session_persona_missing",
+                    requested=persona_id,
+                )
+                persona_id = "default"
+                persona_payload = persona_manager.get("default")
             thread_id = msg.get("thread_id") or f"thr_{int(time.time()*1000):x}"
             await sessions.upsert_session(
                 workspace_id,
@@ -285,8 +342,14 @@ class MPCServer:
                 event="mpc_session_created",
                 workspace_id=workspace_id,
                 thread_id=thread_id,
+                persona_id=persona_id,
             )
-            return {"ok": True, "thread_id": thread_id, "session": session}
+            return {
+                "ok": True,
+                "thread_id": thread_id,
+                "session": session,
+                "persona": persona_payload or {},
+            }
         if action == "resume":
             thread_id = msg.get("thread_id")
             if not thread_id:
@@ -593,11 +656,37 @@ async def mcp_socket(ws: WebSocket):
                     or body.get("workspace_id")
                     or payload.get("workspace_id")
                 )
+                if scope == "agents.resurrect":
+                    persona_id = (
+                        body.get("persona_id")
+                        or payload.get("persona_id")
+                        or headers.get("persona_id")
+                    )
+                    ok = bool(persona_id) and persona_manager.reset(str(persona_id))
+                    frame = {
+                        "id": rid,
+                        "type": "mcp.response",
+                        "ok": ok,
+                        "body": {
+                            "persona_id": persona_id,
+                            "reset": ok,
+                        },
+                    }
+                else:
+                    frame = {
+                        "id": rid,
+                        "type": "mcp.response",
+                        "ok": True,
+                        "body": await server._handle_agents(scope, workspace_id),
+                    }
+            elif scope and scope.startswith("voice."):
+                voice_payload = payload if legacy else body
+                res = await server._handle_voice(voice_payload)
                 frame = {
                     "id": rid,
                     "type": "mcp.response",
-                    "ok": True,
-                    "body": await server._handle_agents(scope, workspace_id),
+                    "ok": bool(res.get("ok")),
+                    "body": res,
                 }
             elif scope and scope.startswith(
                 ("prompts.", "sampling.", "resources.", "cathedral.")

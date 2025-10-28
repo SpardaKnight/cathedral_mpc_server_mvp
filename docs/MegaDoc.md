@@ -78,9 +78,18 @@ Full schema guidance lives in [docs/schemas/ADDON_OPTIONS.md](schemas/ADDON_OPTI
 * Supervisor builds images with `docker buildx build` under BuildKit. Operators can mirror the exact invocation (see [operations/smoke-build.md](operations/smoke-build.md)) to confirm the image constructs without running runtime tests.
 
 ## MCP
+* Handshake advertises the full handled scope set: `session.*`, `memory.*`, `prompts.*`, `config.*`, `sampling.*`, `resources.*`, `agents.*`, and `voice.*`. Tooling continues to delegate `tools.*` to the Home Assistant Supervisor proxy.
 * Implements MPC config scopes including `config.read` and `config.read.result`; the latter hot-applies unlocked LM/Chroma settings to `/api/options` when `auto_config` is enabled.
-* `resources.list` and `resources.health` now surface the merged model catalog and per-host health derived from `/api/status`.
+* `agents.list` exposes the orchestrator agent metadata alongside all persona template IDs discovered under `/data/personas`. `agents.resurrect` resets a persona's runtime state to its template.
+* `resources.list` and `resources.health` surface the merged model catalog and per-host health derived from `/api/status`.
 * MPC sessions remain single-writer but now record the assigned host, model ID, and Chroma collection metadata as part of the session bootstrap.
+* `voice.speak` proxies text to a Wyoming-compatible TTS endpoint (default `127.0.0.1:8181`) and returns base64-encoded PCM audio so Home Assistant can forward spoken responses.
+
+## Persona Management
+Persona templates live under `/data/personas` as YAML or JSON files. Each persona is hydrated on startup and tracked independently from its on-disk template so runtime mutations never overwrite the original definition. When MPC clients request `session.create`, the orchestrator validates the requested `persona_id` and falls back to the `default` persona if a template is missing. Operators or automations can invoke `agents.resurrect` to reset a persona's runtime state back to the template without restarting the add-on.
+
+## Voice Integration
+The orchestrator exposes a `voice.*` MPC scope that relays synthesized audio from a Wyoming-compatible TTS service. By default the proxy connects to `127.0.0.1:8181`, writes the UTF-8 encoded text length-prefixed over TCP, and streams the PCM payload back to the caller. Responses include base64-encoded audio and a `pcm` format marker so downstream Home Assistant flows can convert or play the result immediately. Errors (missing text, network failures) are logged and surfaced to MPC clients with structured error codes.
 
 ## Known Foot-guns
 * Early schema revisions accepted `lm_hosts` as a dict; ensure the current list-of-URL schema is used to avoid validation errors.

@@ -94,7 +94,7 @@ More details on build parity, security posture, concurrency, and operations live
 - Home Assistant add-on (server):
   addons/cathedral_orchestrator/
   → Provides MPC server at ws://<HA-IP>:5005/mcp and OpenAI relay at http://<HA-IP>:8001/v1/*
-  → Handles session.*, memory.*, prompts.*, config.*, sampling.*, resources.*, agents.*; delegates tools.* to HA.
+  → Handles session.*, memory.*, prompts.*, config.*, sampling.*, resources.*, agents.*, voice.*; delegates tools.* to HA.
 
 - AnythingLLM Desktop plugin (client):
   clients/anythingllm_agent_skill/cathedral-mpc-bridge/
