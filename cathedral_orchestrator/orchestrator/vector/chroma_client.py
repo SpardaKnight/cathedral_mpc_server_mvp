@@ -40,6 +40,12 @@ class ChromaClient:
     def base_url(self) -> str:
         return (self._config.url or "").rstrip("/")
 
+    def _v2_base(self, base: str) -> str:
+        return f"{base}/api/v2"
+
+    def _v1_base(self, base: str) -> str:
+        return f"{base}/api/v1"
+
     def _v2(self, path: str) -> str:
         return f"{self.base_url}/api/v2{path}"
 
@@ -189,19 +195,20 @@ class ChromaClient:
         metadatas: Sequence[dict],
         embeddings: Optional[Sequence[Sequence[float]]] = None,
     ) -> bool:
-        """
-        Add or upsert records to an existing collection.
-
-        v2: POST /api/v2/collections/{collection_id}/add
-        v1: POST /api/v1/collections/{collection_id}/add
-        """
-        if not self.base_url:
+        base = self.base_url
+        if not base:
             jlog(logger, level="ERROR", event="chroma_upsert_missing_base")
             return False
         if not collection_id:
             jlog(logger, level="ERROR", event="chroma_upsert_missing_collection")
             return False
 
+        # Prefer API v2 then fall back to v1. Some servers have v1 disabled with 405/410.
+        candidates = [
+            f"{self._v2_base(base)}/collections/{collection_id}/add",
+            f"{self._v1_base(base)}/collections/{collection_id}/add",
+            f"{self._v1_base(base)}/collections/{collection_id}/upsert",
+        ]
         payload: Dict[str, object] = {
             "ids": list(ids),
             "documents": list(documents),
@@ -210,29 +217,67 @@ class ChromaClient:
         if embeddings is not None:
             payload["embeddings"] = [list(vec) for vec in embeddings]
 
-        async def _post(url: str) -> Optional[int]:
-            try:
-                resp = await self._client.post(url, json=payload, timeout=60)
-                return resp.status_code
-            except Exception as exc:
-                jlog(logger, level="WARN", event="chroma_upsert_http_error", url=url, error=str(exc))
-                return None
-
-        for attempt in range(1, 4):
-            # Prefer v2, then fall back
-            if self._prefer_v2:
-                status = await _post(self._v2(f"/collections/{collection_id}/add"))
-                if status and 200 <= status < 300:
-                    jlog(logger, event="chroma_upsert_v2_ok", collection_id=collection_id, count=len(ids))
-                    return True
-                if status and self._should_fallback(status):
-                    self._prefer_v2 = False
-            status = await _post(self._v1(f"/collections/{collection_id}/add"))
-            if status and 200 <= status < 300:
-                jlog(logger, event="chroma_upsert_v1_ok", collection_id=collection_id, count=len(ids))
-                return True
-            if status and self._should_fallback(status):
-                self._prefer_v2 = True
+        attempt = 0
+        item_count = len(ids)
+        while attempt < 3:
+            attempt += 1
+            for url in candidates:
+                try:
+                    resp = await self._client.post(url, json=payload, follow_redirects=True, timeout=30)
+                    status = resp.status_code
+                    if 200 <= status < 300:
+                        jlog(
+                            logger,
+                            event="chroma_upsert_ok",
+                            collection_id=collection_id,
+                            count=item_count,
+                            url=url,
+                            status=status,
+                        )
+                        return True
+                    if status in (404, 405, 410, 501, 503):
+                        jlog(
+                            logger,
+                            level="WARN",
+                            event="chroma_upsert_wrong_api",
+                            url=url,
+                            status=status,
+                            attempt=attempt,
+                        )
+                        continue
+                    body = ""
+                    try:
+                        body = resp.text
+                    except Exception:
+                        pass
+                    jlog(
+                        logger,
+                        level="ERROR",
+                        event="chroma_upsert_bad_status",
+                        status=status,
+                        body=body[:500],
+                        url=url,
+                    )
+                    break
+                except httpx.HTTPStatusError as exc:
+                    jlog(
+                        logger,
+                        level="ERROR",
+                        event="chroma_upsert_http_error",
+                        status=exc.response.status_code,
+                        url=str(exc.request.url),
+                        body=exc.response.text,
+                    )
+                    break
+                except Exception as exc:  # network guard
+                    jlog(
+                        logger,
+                        level="WARN",
+                        event="chroma_upsert_retry",
+                        attempt=attempt,
+                        collection_id=collection_id,
+                        error=str(exc),
+                    )
             await asyncio.sleep(min(2 ** attempt, 5))
         jlog(logger, level="ERROR", event="chroma_upsert_exhausted", collection_id=collection_id)
         return False
