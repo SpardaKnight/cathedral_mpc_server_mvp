@@ -471,6 +471,10 @@ async def _refresh_model_catalog() -> None:
 
 # --- bootstrap loop -----------------------------------------------------------
 async def _bootstrap_loop(interval_seconds: int = 30) -> None:
+    """
+    Background loop that refreshes options, host pool, and readiness.
+    Never raises. Never blocks app startup.
+    """
     while True:
         try:
             await reload_clients_from_options(dict(CURRENT_OPTIONS))

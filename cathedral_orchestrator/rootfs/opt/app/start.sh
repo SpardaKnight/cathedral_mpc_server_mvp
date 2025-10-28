@@ -17,15 +17,21 @@ LM_HOSTS=$(jq -r '
 
 CHROMA_URL=$(jq -r '.chroma_url // empty' "$OPTS")
 
+reachable=""
 for HOST in $LM_HOSTS; do
   TARGET="${HOST%/}/v1/models"
-  echo "[WAIT] Probing LM host $TARGET"
-  until curl -sS --fail "$TARGET" >/dev/null; do
-    echo "[ERROR] LM host not reachable: $TARGET" >&2
-    sleep 2
-  done
-  echo "[READY] LM host $TARGET responded"
+  if curl -sS --fail --max-time 2 "$TARGET" >/dev/null; then
+    echo "[READY] LM host $TARGET responded"
+    reachable="$TARGET"
+    break
+  else
+    echo "[WARN] LM host not reachable: $TARGET; continuing startup"
+  fi
 done
+
+if [ -z "$reachable" ]; then
+  echo "[WARN] No LM host reachable at startup; FastAPI will retry in background"
+fi
 
 if [ -n "${CHROMA_URL:-}" ]; then
   DOCS="${CHROMA_URL%/}/docs"

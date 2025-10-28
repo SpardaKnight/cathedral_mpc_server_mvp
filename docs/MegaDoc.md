@@ -25,7 +25,7 @@ repo root
 
 `/api/status` merges all configured LM hosts into a single model catalog, reports per-host health, exposes LM/Chroma readiness, and tracks active session counts so operators can confirm routing, host affinity, and Chroma collection provisioning at a glance.
 
-The Home Assistant watchdog is configured for `tcp://[HOST]:[PORT:8001]`. A resilient background bootstrap loop now refreshes LM hosts, model catalogs, and readiness flags without blocking startup, so the API remains available even if LM Studio is offline. `/health` continues to gate Supervisor readiness and reports `bootstrap_pending` until probes succeed.
+The Home Assistant watchdog is configured for `tcp://[HOST]:[PORT:8001]`. A resilient background bootstrap loop now refreshes LM hosts, model catalogs, and readiness flags without blocking startup, so the API remains available even if LM Studio is offline. The s6 `start.sh` probe logs warnings when hosts are unreachable but proceeds to launch Uvicorn immediately, relying on the background loop to finalize readiness. `/health` continues to gate Supervisor readiness and reports `bootstrap_pending` until probes succeed.
 
 ## Options Schema (authoritative)
 | Option | Type | Required? | Default | Description | Example |

@@ -1,5 +1,9 @@
 # Cathedral Orchestrator Docs Changelog
 
+## 0.2.6
+- Document the non-blocking s6 startup probe flow and background bootstrap loop so operators know the API will come up even when LM hosts are offline.
+- Capture the immediate `/api/options` refresh semantics and tightened LM client timeouts to guide troubleshooting for hostpool updates.
+
 ## 0.1.3
 - Document `/v1/models` metadata enrichment and the `/api/v0/models` aggregator so operators know context windows are surfaced
   automatically for AnythingLLM and similar clients.
@@ -17,12 +21,6 @@
 - Documented migration to Debian Bookworm base image and `/opt/venv` install strategy.
 - Recorded repository layout compliance with Home Assistant add-on requirements.
 - Version bump references set to `0.1.1` for Supervisor builds.
-
-## Unreleased
-- Documented `/api/status` readiness payload (catalog, host health, sessions) and MPC host/model assignment.
-- Recorded SSE relay hardening with enforced `text/event-stream`, idle timeouts, and synthetic `[DONE]` frames.
-- Added `/api/options` hot-apply guardrails, per-key locks, and Chroma collection provisioning notes.
-- Captured the non-blocking bootstrap loop, LM probe timeout tuning, and `/api/options` immediate refresh so operators can repair host pools without restarts.
 
 ## Adopt EVE MegaDoc structure + HA env mirror
 - Added Cathedral MegaDoc, structured schema/spec/ops docs, and source doclets mirroring the EVE Data Export discipline.
