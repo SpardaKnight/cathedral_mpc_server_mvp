@@ -1,5 +1,10 @@
 # Cathedral Orchestrator – Changelog
 
+## [0.2.0]
+- Add PyYAML to the add-on image and guard `import yaml` to restore FastAPI boot.
+- Keep Chroma v2-first with a strict v1 fallback and redirect-friendly lookups; tolerate 404/405/409/410/422 on create/read and retry the alternate path.
+- No changes to the SSE relay path; streaming remains a raw pass-through with a `[DONE]` sentinel on quiet upstream termination.
+
 ## [0.1.9]
 - Wire persona templates, agents reset support, and Wyoming-compatible voice proxy into the MPC server while advertising the voice.* scope.
 - Harden ToolBridge domain enforcement and error handling for Supervisor service calls.

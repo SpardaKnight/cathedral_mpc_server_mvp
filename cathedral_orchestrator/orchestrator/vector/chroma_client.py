@@ -52,11 +52,6 @@ class ChromaClient:
     def _v1(self, path: str) -> str:
         return f"{self.base_url}/api/v1{path}"
 
-    @staticmethod
-    def _should_fallback(status: int) -> bool:
-        # Common responses on mismatched API versions
-        return status in (404, 405, 410, 422)
-
     # ---- health --------------------------------------------------------------
 
     async def health(self) -> bool:
@@ -109,80 +104,124 @@ class ChromaClient:
             cached = self._collection_cache.get(target)
             if cached:
                 return cached
-            if await self._ensure_collection_v2(target):
-                return self._collection_cache.get(target)
-            if await self._ensure_collection_v1(target):
-                return self._collection_cache.get(target)
+
+            collection_id = await self._ensure_collection_v2(base, target)
+            if collection_id:
+                self._collection_cache[target] = collection_id
+                return collection_id
+
+            collection_id = await self._ensure_collection_v1(base, target)
+            if collection_id:
+                self._collection_cache[target] = collection_id
+                return collection_id
+
             return None
 
-    async def _ensure_collection_v2(self, target: str) -> bool:
-        if not self.base_url:
-            return False
+    async def _ensure_collection_v2(self, base: str, target: str) -> Optional[str]:
         # GET by name
         try:
-            url = self._v2("/collections/by_name")
+            url = f"{self._v2_base(base)}/collections/by_name"
             resp = await self._client.get(url, params={"name": target}, timeout=20, follow_redirects=True)
             if resp.status_code == 200:
                 data = resp.json() or {}
                 cid = data.get("id") or (data.get("collection") or {}).get("id")
                 if cid:
-                    self._collection_cache[target] = str(cid)
                     self._prefer_v2 = True
                     jlog(logger, event="chroma_collection_found_v2", name=target, collection_id=str(cid))
-                    return True
+                    return str(cid)
         except Exception as exc:
             jlog(logger, level="WARN", event="chroma_collection_lookup_failed_v2", name=target, error=str(exc))
+
         # POST to create
         try:
-            url = self._v2("/collections")
+            url = f"{self._v2_base(base)}/collections"
             payload = {"name": target, "metadata": {}}
             resp = await self._client.post(url, json=payload, timeout=30, follow_redirects=True)
             if resp.status_code in (200, 201):
                 data = resp.json() or {}
                 cid = data.get("id") or (data.get("collection") or {}).get("id")
                 if cid:
-                    self._collection_cache[target] = str(cid)
                     self._prefer_v2 = True
                     jlog(logger, event="chroma_collection_created_v2", name=target, collection_id=str(cid))
-                    return True
-            elif self._should_fallback(resp.status_code):
-                jlog(logger, level="WARN", event="chroma_collection_create_v2_unavailable", name=target, status=resp.status_code)
+                    return str(cid)
+
+            if resp.status_code in (400, 404, 405, 409, 410, 422):
+                jlog(
+                    logger,
+                    level="WARN",
+                    event="chroma_collection_create_v2_retry",
+                    name=target,
+                    status=resp.status_code,
+                )
+                retry = await self._client.get(
+                    f"{self._v2_base(base)}/collections/by_name",
+                    params={"name": target},
+                    timeout=20,
+                    follow_redirects=True,
+                )
+                if retry.status_code == 200:
+                    data = retry.json() or {}
+                    cid = data.get("id") or (data.get("collection") or {}).get("id")
+                    if cid:
+                        self._prefer_v2 = True
+                        jlog(logger, event="chroma_collection_exists_v2", name=target, collection_id=str(cid))
+                        return str(cid)
         except Exception as exc:
             jlog(logger, level="WARN", event="chroma_collection_create_failed_v2", name=target, error=str(exc))
-        return False
 
-    async def _ensure_collection_v1(self, target: str) -> bool:
-        if not self.base_url:
-            return False
+        return None
+
+    async def _ensure_collection_v1(self, base: str, target: str) -> Optional[str]:
         # GET by name
         try:
-            url = self._v1(f"/collections/{target}")
+            url = f"{self._v1_base(base)}/collections/{target}"
             resp = await self._client.get(url, timeout=20, follow_redirects=True)
             if resp.status_code == 200:
                 data = resp.json() or {}
                 cid = data.get("id") or (data.get("collection") or {}).get("id")
                 if cid:
-                    self._collection_cache[target] = str(cid)
                     self._prefer_v2 = False
                     jlog(logger, event="chroma_collection_found_v1", name=target, collection_id=str(cid))
-                    return True
+                    return str(cid)
         except Exception as exc:
             jlog(logger, level="WARN", event="chroma_collection_lookup_failed_v1", name=target, error=str(exc))
+
         # POST to create
         try:
-            url = self._v1("/collections")
+            url = f"{self._v1_base(base)}/collections"
             resp = await self._client.post(url, json={"name": target}, timeout=30, follow_redirects=True)
             if resp.status_code in (200, 201):
                 data = resp.json() or {}
                 cid = data.get("id") or (data.get("collection") or {}).get("id")
                 if cid:
-                    self._collection_cache[target] = str(cid)
                     self._prefer_v2 = False
                     jlog(logger, event="chroma_collection_created_v1", name=target, collection_id=str(cid))
-                    return True
+                    return str(cid)
+
+            if resp.status_code in (400, 404, 405, 409, 410, 422):
+                jlog(
+                    logger,
+                    level="WARN",
+                    event="chroma_collection_create_v1_retry",
+                    name=target,
+                    status=resp.status_code,
+                )
+                retry = await self._client.get(
+                    f"{self._v1_base(base)}/collections/{target}",
+                    timeout=20,
+                    follow_redirects=True,
+                )
+                if retry.status_code == 200:
+                    data = retry.json() or {}
+                    cid = data.get("id") or (data.get("collection") or {}).get("id")
+                    if cid:
+                        self._prefer_v2 = False
+                        jlog(logger, event="chroma_collection_exists_v1", name=target, collection_id=str(cid))
+                        return str(cid)
         except Exception as exc:
             jlog(logger, level="WARN", event="chroma_collection_create_failed_v1", name=target, error=str(exc))
-        return False
+
+        return None
 
     # ---- upserts -------------------------------------------------------------
 

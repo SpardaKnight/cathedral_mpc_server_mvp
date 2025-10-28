@@ -3,16 +3,93 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from copy import deepcopy
 from pathlib import Path
 from typing import Dict, Optional
 
-import yaml  # type: ignore[import]
+try:  # optional, guarded at runtime
+    import yaml  # type: ignore[import]
+except Exception:  # pragma: no cover - optional dependency guard
+    yaml = None  # type: ignore[assignment]
 
 from .logging_config import jlog
 
 logger = logging.getLogger("cathedral")
+
+if yaml is None:  # pragma: no cover - import guard
+    jlog(logger, level="WARN", event="persona_yaml_module_missing")
+
+
+def load_yaml(path: Path) -> Dict[str, object]:
+    """Load persona configuration with graceful fallback when PyYAML is absent."""
+
+    if yaml is None:
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                contents = handle.read()
+        except Exception as exc:  # pragma: no cover - filesystem guard
+            jlog(
+                logger,
+                level="ERROR",
+                event="persona_load_failed",
+                path=str(path),
+                error=str(exc),
+            )
+            return {}
+
+        if not contents.strip():
+            jlog(logger, level="WARN", event="persona_load_empty", path=str(path))
+            return {}
+
+        try:
+            data = json.loads(contents)
+        except Exception as exc:  # pragma: no cover - JSON guard
+            jlog(
+                logger,
+                level="ERROR",
+                event="persona_load_failed",
+                path=str(path),
+                error=str(exc),
+            )
+            return {}
+
+        if isinstance(data, dict):
+            jlog(
+                logger,
+                level="WARN",
+                event="persona_load_json_fallback",
+                path=str(path),
+            )
+            return data
+
+        jlog(
+            logger,
+            level="WARN",
+            event="persona_load_json_ignored",
+            path=str(path),
+        )
+        return {}
+
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = yaml.safe_load(handle) or {}
+    except Exception as exc:  # pragma: no cover - YAML guard
+        jlog(
+            logger,
+            level="ERROR",
+            event="persona_load_failed",
+            path=str(path),
+            error=str(exc),
+        )
+        return {}
+
+    if isinstance(payload, dict):
+        return payload
+
+    jlog(logger, level="WARN", event="persona_load_yaml_non_mapping", path=str(path))
+    return {}
 
 PERSONAS_DIR = Path("/data/personas")
 VOICE_HOST = "127.0.0.1"
@@ -34,26 +111,16 @@ class PersonaManager:
             for entry in sorted(PERSONAS_DIR.iterdir()):
                 if entry.suffix.lower() not in {".yaml", ".yml", ".json"}:
                     continue
-                try:
-                    with entry.open("r", encoding="utf-8") as handle:
-                        data = yaml.safe_load(handle) or {}
-                    if isinstance(data, dict):
-                        key = entry.stem
-                        self.personas[key] = data
-                        self.active_states[key] = deepcopy(data)
-                        jlog(
-                            logger,
-                            event="persona_loaded",
-                            persona_id=key,
-                            path=str(entry),
-                        )
-                except Exception as exc:  # pragma: no cover - defensive
+                data = load_yaml(entry)
+                if isinstance(data, dict):
+                    key = entry.stem
+                    self.personas[key] = data
+                    self.active_states[key] = deepcopy(data)
                     jlog(
                         logger,
-                        level="ERROR",
-                        event="persona_load_failed",
+                        event="persona_loaded",
+                        persona_id=key,
                         path=str(entry),
-                        error=str(exc),
                     )
 
         if "default" not in self.personas:
