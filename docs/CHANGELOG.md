@@ -1,5 +1,10 @@
 # Cathedral Orchestrator Docs Changelog
 
+## 0.1.3
+- Document `/v1/models` metadata enrichment and the `/api/v0/models` aggregator so operators know context windows are surfaced
+  automatically for AnythingLLM and similar clients.
+- Capture the new runtime requirements manifest (with PyYAML) in the Docker build description to keep packaging steps aligned.
+
 ## 0.1.2
 - Home Assistant add-on manifest mirrored in YAML/JSON with tcp watchdog, port descriptions, and version bump guidance for store updates.
 - `/api/status` documented with readiness flags, catalog export, and per-host health telemetry.

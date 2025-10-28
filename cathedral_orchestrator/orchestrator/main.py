@@ -28,6 +28,9 @@ APP_CLIENTS: Dict[str, httpx.AsyncClient] = {}
 OPTIONS_PATH = Path(os.environ.get("CATHEDRAL_OPTIONS_PATH", "/data/options.json"))
 OPTIONS_LOCK = asyncio.Lock()
 
+# Host -> model_id -> metadata (context_length, embedding_length, etc.)
+MODEL_META: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
 
 def load_options_from_disk() -> Dict[str, Any]:
     try:
@@ -375,11 +378,12 @@ async def reload_clients_from_options(
 
 
 async def _refresh_model_catalog() -> None:
-    global MODEL_CATALOG, HOST_HEALTH
+    global MODEL_CATALOG, HOST_HEALTH, MODEL_META
     hosts = [host.rstrip("/") for host in LM_HOSTS.values()]
     if not hosts:
         MODEL_CATALOG = {}
         HOST_HEALTH = {}
+        MODEL_META = {}
         jlog(logger, event="model_catalog_empty")
         return
 
@@ -388,13 +392,29 @@ async def _refresh_model_catalog() -> None:
         jlog(logger, level="WARN", event="model_catalog_client_missing")
         return
 
-    tasks = [list_models_from_host(client, host) for host in hosts]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    tasks_v1 = [list_models_from_host(client, host) for host in hosts]
+    # Try to harvest LM Studio metadata for context_length/max_context_length
+    tasks_v0 = [fetch_lmstudio_model_meta(client, host) for host in hosts]
+    results_v1 = await asyncio.gather(*tasks_v1, return_exceptions=True)
+    results_v0 = await asyncio.gather(*tasks_v0, return_exceptions=True)
 
     catalog: Dict[str, List[str]] = {}
     health: Dict[str, str] = {}
+    meta_by_host: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for base, meta_result in zip(hosts, results_v0):
+        if isinstance(meta_result, BaseException):
+            meta_by_host[base] = {}
+            jlog(
+                logger,
+                level="WARN",
+                event="lmstudio_meta_gather_failed",
+                host=base,
+                error=str(meta_result),
+            )
+        else:
+            meta_by_host[base] = meta_result or {}
 
-    for host, result in zip(hosts, results):
+    for host, result in zip(hosts, results_v1):
         if isinstance(result, BaseException):
             catalog[host] = []
             health[host] = "down"
@@ -431,7 +451,81 @@ async def _refresh_model_catalog() -> None:
 
     MODEL_CATALOG = catalog
     HOST_HEALTH = health
+    MODEL_META = meta_by_host
     jlog(logger, event="model_catalog_refreshed", hosts=len(catalog))
+
+
+async def fetch_lmstudio_model_meta(
+    client: httpx.AsyncClient, base: str
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Query LM Studio's metadata endpoint(s) to obtain per-model context sizes.
+    Returns mapping: model_id -> {"context_length": int, "max_context_length": int, "embedding_length": int, ...}
+    """
+    base = base.rstrip("/")
+    candidates = [
+        f"{base}/api/v0/models",  # LM Studio REST (preferred)
+        f"{base}/models",  # Some older builds expose a plain /models
+    ]
+    for url in candidates:
+        try:
+            resp = await client.get(url, follow_redirects=True, timeout=20)
+            if resp.status_code != 200:
+                continue
+            data = resp.json() or {}
+            model_meta: Dict[str, Dict[str, Any]] = {}
+            buckets: List[List[Dict[str, Any]]] = []
+            for key in ("loaded", "downloaded", "models", "data"):
+                val = data.get(key) if isinstance(data, dict) else None
+                if isinstance(val, list):
+                    buckets.append(val)
+            if not buckets and isinstance(data, list):
+                buckets = [data]
+            for bucket in buckets:
+                for item in bucket:
+                    if not isinstance(item, dict):
+                        continue
+                    mid = (
+                        item.get("name")
+                        or item.get("id")
+                        or item.get("model")
+                        or item.get("model_id")
+                    )
+                    if not mid:
+                        continue
+                    ctx = (
+                        item.get("max_context_length")
+                        or item.get("context_length")
+                        or item.get("contextLength")
+                        or item.get("context_window")
+                    )
+                    emb = item.get("embedding_length") or item.get("embeddingLength") or None
+                    meta: Dict[str, Any] = {}
+                    if isinstance(ctx, int):
+                        meta["context_length"] = ctx
+                        meta["max_context_length"] = ctx
+                        meta["max_input_tokens"] = ctx
+                        meta["context_window"] = ctx
+                    if isinstance(emb, int):
+                        meta["embedding_length"] = emb
+                    if meta:
+                        model_meta[str(mid)] = meta
+            jlog(
+                logger,
+                event="lmstudio_meta_harvest",
+                host=base,
+                models=len(model_meta),
+            )
+            return model_meta
+        except Exception as exc:  # pragma: no cover
+            jlog(
+                logger,
+                level="WARN",
+                event="lmstudio_meta_probe_error",
+                url=url,
+                error=str(exc),
+            )
+    return {}
 
 
 def is_bootstrap_ready() -> bool:
@@ -718,30 +812,95 @@ async def api_set_options(request: Request) -> JSONResponse:
 
 @app.get("/v1/models")
 async def models_v1(_request: Request):
-    client = APP_CLIENTS.get("lm")
-    if not client:
-        raise HTTPException(status_code=503, detail="client not ready")
-    if not LM_HOSTS:
-        raise HTTPException(status_code=503, detail="no lm hosts configured")
-    tasks = [list_models_from_host(client, base) for base in LM_HOSTS.values()]
-    results = await asyncio.gather(*tasks)
+    catalog = await _catalog_provider()
     union: List[Dict[str, Any]] = []
-    for base, models in results:
-        for model in models:
-            if "id" in model:
-                union.append(model)
-            elif "name" in model:
-                merged = {
-                    "id": model["name"],
-                    **{k: v for k, v in model.items() if k != "name"},
-                }
-                union.append(merged)
+    now = int(datetime.utcnow().timestamp())
+    for host, models in catalog.items():
+        per_host_meta = MODEL_META.get(host.rstrip("/"), {}) if isinstance(MODEL_META, dict) else {}
+        for mid in models:
+            entry: Dict[str, Any] = {
+                "id": mid,
+                "object": "model",
+                "owned_by": "upstream",
+                "created": now,
+            }
+            meta = per_host_meta.get(mid)
+            if isinstance(meta, dict):
+                if "context_length" in meta:
+                    entry["context_length"] = int(meta["context_length"])
+                    entry["max_context_length"] = int(meta["context_length"])
+                    entry["max_input_tokens"] = int(meta["context_length"])
+                    entry["context_window"] = int(meta["context_length"])
+                if "embedding_length" in meta:
+                    entry["embedding_length"] = int(meta["embedding_length"])
+            union.append(entry)
+    jlog(
+        logger,
+        event="models_v1_union",
+        hosts=len(catalog),
+        models=len(union),
+    )
     return JSONResponse({"object": "list", "data": union})
 
 
 @app.get("/api/v0/models")
-async def models_v0_alias(request: Request):
-    return await models_v1(request)
+async def models_v0_aggregate(_request: Request):
+    """
+    Provide a REST-style model inventory compatible with LM Studio's /api/v0/models,
+    unioned across configured hosts. If exactly one host is configured, we pass through.
+    """
+    client = APP_CLIENTS.get("lm")
+    if not client:
+        raise HTTPException(status_code=503, detail="client not ready")
+    hosts = list(LM_HOSTS.values())
+    if not hosts:
+        return JSONResponse({"loaded": [], "downloaded": []})
+
+    if len(hosts) == 1:
+        url = hosts[0].rstrip("/") + "/api/v0/models"
+        try:
+            resp = await client.get(url, follow_redirects=True, timeout=20)
+            resp.raise_for_status()
+            payload = resp.json()
+            jlog(
+                logger,
+                event="models_v0_passthrough",
+                host=hosts[0].rstrip("/"),
+            )
+            return JSONResponse(payload)
+        except Exception as exc:
+            jlog(
+                logger,
+                level="WARN",
+                event="models_v0_passthrough_failed",
+                host=hosts[0].rstrip("/"),
+                error=str(exc),
+            )
+
+    loaded: List[Dict[str, Any]] = []
+    catalog = await _catalog_provider()
+    for host, models in catalog.items():
+        meta = MODEL_META.get(host.rstrip("/"), {}) if isinstance(MODEL_META, dict) else {}
+        for mid in models:
+            item: Dict[str, Any] = {
+                "name": mid,
+                "state": "loaded",
+                "provider": "upstream",
+            }
+            m = meta.get(mid, {})
+            if "context_length" in m:
+                item["context_length"] = int(m["context_length"])
+                item["max_context_length"] = int(m["context_length"])
+            if "embedding_length" in m:
+                item["embedding_length"] = int(m["embedding_length"])
+            loaded.append(item)
+    jlog(
+        logger,
+        event="models_v0_union",
+        hosts=len(catalog),
+        loaded=len(loaded),
+    )
+    return JSONResponse({"loaded": loaded, "downloaded": []})
 
 
 async def _route_for_model(model: str) -> str:

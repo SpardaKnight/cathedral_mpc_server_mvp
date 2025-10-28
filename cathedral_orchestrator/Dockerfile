@@ -15,11 +15,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/app
+COPY requirements.txt /opt/app/requirements.txt
 COPY orchestrator/ /opt/app/orchestrator/
 
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
-RUN pip install --no-cache-dir --upgrade pip && \
+RUN . /opt/venv/bin/activate && \
+    pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r /opt/app/requirements.txt && \
     pip install --no-cache-dir \
       fastapi==0.115.0 \
       uvicorn==0.30.6 \
