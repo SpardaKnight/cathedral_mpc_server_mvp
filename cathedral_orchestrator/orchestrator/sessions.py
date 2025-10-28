@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from pathlib import Path
@@ -10,6 +11,8 @@ import aiosqlite
 from .logging_config import jlog
 
 DB_PATH = Path("/data/sessions.db")
+DEFAULT_TTL_MINUTES = 120
+DEFAULT_PRUNE_INTERVAL_SECONDS = 15 * 60
 
 INIT_SQL = """
 PRAGMA journal_mode=WAL;
@@ -271,7 +274,7 @@ async def list_active() -> int:
         return 0
 
 
-async def prune_idle(ttl_minutes: int = 120) -> int:
+async def prune_idle(ttl_minutes: int = DEFAULT_TTL_MINUTES) -> int:
     cutoff = time.time() - (ttl_minutes * 60)
     try:
         async with await _connect() as db:
@@ -297,3 +300,7 @@ async def prune_idle(ttl_minutes: int = 120) -> int:
             error=str(exc),
         )
         return 0
+
+
+def prune_expired(ttl_minutes: int = DEFAULT_TTL_MINUTES) -> int:
+    return asyncio.run(prune_idle(ttl_minutes=ttl_minutes))
