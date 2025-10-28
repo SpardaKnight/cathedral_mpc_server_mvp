@@ -25,7 +25,7 @@ repo root
 
 `/api/status` merges all configured LM hosts into a single model catalog, reports per-host health, exposes LM/Chroma readiness, and tracks active session counts so operators can confirm routing, host affinity, and Chroma collection provisioning at a glance.
 
-The Home Assistant watchdog is configured for `tcp://[HOST]:[PORT:8001]`. Startup probes block on LM `/v1/models` and Chroma docs until they respond, then verify `nc -z 127.0.0.1 8001` before signalling readiness so Supervisor stays green after restarts.
+The Home Assistant watchdog is configured for `tcp://[HOST]:[PORT:8001]`. A resilient background bootstrap loop now refreshes LM hosts, model catalogs, and readiness flags without blocking startup, so the API remains available even if LM Studio is offline. `/health` continues to gate Supervisor readiness and reports `bootstrap_pending` until probes succeed.
 
 ## Options Schema (authoritative)
 | Option | Type | Required? | Default | Description | Example |
@@ -58,7 +58,7 @@ Full schema guidance lives in [docs/schemas/ADDON_OPTIONS.md](schemas/ADDON_OPTI
 
 ## Concurrency
 * Server-Sent Events enforce `text/event-stream`, monitor client disconnects, and enforce a five-minute idle timeout. The relay injects `data: [DONE]` when upstreams terminate without sending the sentinel so clients do not hang.
-* LM HTTP clients are shared across requests with `max_connections=100` and `max_keepalive_connections=20` to balance concurrency and memory footprint.
+* LM HTTP clients are shared across requests with `max_connections=100` and `max_keepalive_connections=20` to balance concurrency and memory footprint, and short (5s connect/read) probe timeouts keep host refresh loops responsive while streaming relays spin up dedicated clients with unlimited read windows.
 * Uvicorn runs with `uvloop` and `httptools` (provided by the add-on image) for efficient async dispatch. MPC WebSocket sessions share the same event loop, and SQLite writes rely on WAL mode to avoid blocking.
 
 ## Security

@@ -145,35 +145,41 @@ class HostPool:
     async def refresh(
         self, client: httpx.AsyncClient
     ) -> Dict[str, List[Dict[str, Any]]]:
-        if not self._hosts:
+        try:
+            if not self._hosts:
+                async with self._lock:
+                    self._catalog = {}
+                jlog(logger, level="DEBUG", event="hostpool_refresh", hosts=0)
+                return {}
+
+            bases = list(self._hosts.values())
+            tasks = [list_models_from_host(client, base) for base in bases]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            catalog: Dict[str, List[Dict[str, Any]]] = {}
+            for base, result in zip(bases, results):
+                base_key = base.rstrip("/")
+                if isinstance(result, BaseException):
+                    catalog[base_key] = []
+                    jlog(
+                        logger,
+                        level="WARN",
+                        event="hostpool_refresh_failed",
+                        host=base_key,
+                        error=str(result),
+                    )
+                    continue
+                real_base, models = cast(Tuple[str, List[Dict[str, Any]]], result)
+                catalog[real_base.rstrip("/")] = models
+            async with self._lock:
+                self._catalog = catalog
+            counts = {base: len(models) for base, models in catalog.items()}
+            jlog(logger, event="hostpool_refreshed", counts=counts)
+            return catalog
+        except Exception as exc:
+            jlog(logger, level="WARN", event="hostpool_refresh_failed", error=str(exc))
             async with self._lock:
                 self._catalog = {}
-            jlog(logger, level="DEBUG", event="hostpool_refresh", hosts=0)
             return {}
-
-        bases = list(self._hosts.values())
-        tasks = [list_models_from_host(client, base) for base in bases]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        catalog: Dict[str, List[Dict[str, Any]]] = {}
-        for base, result in zip(bases, results):
-            base_key = base.rstrip("/")
-            if isinstance(result, BaseException):
-                catalog[base_key] = []
-                jlog(
-                    logger,
-                    level="WARN",
-                    event="hostpool_refresh_failed",
-                    host=base_key,
-                    error=str(result),
-                )
-                continue
-            real_base, models = cast(Tuple[str, List[Dict[str, Any]]], result)
-            catalog[real_base.rstrip("/")] = models
-        async with self._lock:
-            self._catalog = catalog
-        counts = {base: len(models) for base, models in catalog.items()}
-        jlog(logger, event="hostpool_refreshed", counts=counts)
-        return catalog
 
     async def get_catalog(self) -> Dict[str, List[str]]:
         async with self._lock:
@@ -463,6 +469,20 @@ async def _refresh_model_catalog() -> None:
     jlog(logger, event="model_catalog_refreshed", hosts=len(MODEL_CATALOG))
 
 
+# --- bootstrap loop -----------------------------------------------------------
+async def _bootstrap_loop(interval_seconds: int = 30) -> None:
+    while True:
+        try:
+            await reload_clients_from_options(dict(CURRENT_OPTIONS))
+            await update_bootstrap_state(force_refresh=True)
+        except Exception as exc:
+            jlog(logger, level="WARN", event="bootstrap_loop_error", error=str(exc))
+        try:
+            await asyncio.sleep(interval_seconds)
+        except Exception:
+            pass
+
+
 def is_bootstrap_ready() -> bool:
     return BOOTSTRAP_EVENT.is_set()
 
@@ -494,22 +514,49 @@ async def update_bootstrap_state(
     global AUTO_CONFIG_ACTIVE, UPSERTS_ACTIVE, CURRENT_OPTIONS
 
     client = APP_CLIENTS.get("lm")
-    catalog: Dict[str, List[str]] = {} if catalog_override is None else catalog_override
-    if catalog_override is None and HOST_POOL is not None:
+    catalog: Dict[str, List[str]] = {}
+    if catalog_override is not None:
+        catalog = catalog_override
+    elif HOST_POOL is not None:
         if force_refresh and client:
-            await HOST_POOL.refresh(client)
-        catalog = await HOST_POOL.get_catalog()
+            try:
+                await HOST_POOL.refresh(client)
+            except Exception as exc:
+                jlog(
+                    logger,
+                    level="WARN",
+                    event="bootstrap_state_hostpool_refresh_failed",
+                    error=str(exc),
+                )
+        try:
+            catalog = await HOST_POOL.get_catalog()
+        except Exception as exc:
+            jlog(
+                logger,
+                level="WARN",
+                event="bootstrap_state_catalog_failed",
+                error=str(exc),
+            )
     lm_ready = any(models for models in catalog.values())
 
     if chroma_ready_override is not None:
         chroma_ready = chroma_ready_override
     else:
-        if CHROMA_URL and CHROMA_CLIENT is not None:
-            chroma_ready = await CHROMA_CLIENT.health()
-        elif CHROMA_URL:
+        try:
+            if CHROMA_URL and CHROMA_CLIENT is not None:
+                chroma_ready = await CHROMA_CLIENT.health()
+            elif CHROMA_URL:
+                chroma_ready = False
+            else:
+                chroma_ready = True
+        except Exception as exc:
+            jlog(
+                logger,
+                level="WARN",
+                event="bootstrap_state_chroma_failed",
+                error=str(exc),
+            )
             chroma_ready = False
-        else:
-            chroma_ready = True
 
     ready = lm_ready and chroma_ready
     if ready:
@@ -560,7 +607,7 @@ async def get_readiness() -> Tuple[bool, bool, bool]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     APP_CLIENTS["lm"] = httpx.AsyncClient(
-        timeout=httpx.Timeout(connect=30, write=30, read=None, pool=None),
+        timeout=httpx.Timeout(connect=5, read=5, write=10, pool=None),
         limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
     )
     APP_CLIENTS["chroma"] = httpx.AsyncClient(
@@ -581,8 +628,7 @@ async def lifespan(app: FastAPI):
     set_server(server)
     start_pruner()
     try:
-        await reload_clients_from_options(dict(CURRENT_OPTIONS))
-        await update_bootstrap_state(force_refresh=True)
+        asyncio.create_task(_bootstrap_loop(interval_seconds=30))
         yield
     finally:
         stop_pruner()
@@ -744,6 +790,7 @@ async def api_set_options(request: Request) -> JSONResponse:
                 {"ok": False, "error": "persist_failed"}, status_code=500
             )
     await reload_clients_from_options(dict(payload))
+    await update_bootstrap_state(force_refresh=True)
     jlog(logger, event="api_options_updated", keys=list(payload.keys()))
     return JSONResponse({"ok": True, "options": dict(CURRENT_OPTIONS)})
 
