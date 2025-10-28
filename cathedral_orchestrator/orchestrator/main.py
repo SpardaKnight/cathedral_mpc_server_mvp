@@ -214,78 +214,66 @@ BOOTSTRAP_EVENT = asyncio.Event()
 MODEL_CATALOG: Dict[str, List[str]] = {}
 HOST_HEALTH: Dict[str, str] = {}
 
-PRUNE_INTERVAL_SECONDS = 15 * 60
-SESSION_TTL_MINUTES = 120
-
+# --- session prune loop (idempotent) -----------------------------------------
 _prune_thread: Optional[threading.Thread] = None
 _prune_stop = threading.Event()
-_prune_lock = threading.Lock()
 
 
 def _prune_loop() -> None:
-    global _prune_thread
     jlog(
         logger,
         event="session_prune_loop_started",
-        ttl_minutes=SESSION_TTL_MINUTES,
-        interval_seconds=PRUNE_INTERVAL_SECONDS,
+        ttl_minutes=sessions.DEFAULT_TTL_MINUTES,
+        interval_seconds=sessions.DEFAULT_PRUNE_INTERVAL_SECONDS,
     )
-    while not _prune_stop.is_set():
-        try:
-            pruned = asyncio.run(sessions.prune_idle(ttl_minutes=SESSION_TTL_MINUTES))
-            jlog(
-                logger,
-                event="session_prune_cycle",
-                pruned=pruned,
-                ttl_minutes=SESSION_TTL_MINUTES,
-            )
-        except Exception as exc:  # pragma: no cover - scheduler guard
-            jlog(
-                logger,
-                level="ERROR",
-                event="session_prune_cycle_failed",
-                error=str(exc),
-                ttl_minutes=SESSION_TTL_MINUTES,
-            )
-        if _prune_stop.wait(PRUNE_INTERVAL_SECONDS):
-            break
-    jlog(logger, event="session_prune_loop_stopped")
-    _prune_thread = None
+    try:
+        while not _prune_stop.is_set():
+            try:
+                pruned = sessions.prune_expired()
+                jlog(
+                    logger,
+                    event="session_prune_cycle",
+                    pruned=int(pruned),
+                    ttl_minutes=sessions.DEFAULT_TTL_MINUTES,
+                )
+            except Exception as exc:  # defensive
+                jlog(
+                    logger,
+                    level="ERROR",
+                    event="session_prune_failed",
+                    ttl_minutes=sessions.DEFAULT_TTL_MINUTES,
+                    error=str(exc),
+                )
+            _prune_stop.wait(sessions.DEFAULT_PRUNE_INTERVAL_SECONDS)
+    finally:
+        jlog(logger, event="session_prune_loop_stopped")
 
 
-def _start_pruner_if_needed() -> None:
+def start_pruner() -> None:
     global _prune_thread
-    with _prune_lock:
-        if _prune_thread and _prune_thread.is_alive():
-            jlog(logger, event="session_prune_loop_active")
-            return
-        _prune_stop.clear()
-        thread = threading.Thread(
-            target=_prune_loop,
-            name="ttl-pruner",
-            daemon=True,
-        )
-        _prune_thread = thread
-        thread.start()
-        jlog(logger, event="session_prune_loop_spawned")
+    if _prune_thread and _prune_thread.is_alive():
+        jlog(logger, event="session_prune_loop_already_running")
+        return
+    _prune_stop.clear()
+    _prune_thread = threading.Thread(
+        target=_prune_loop,
+        name="cathedral-session-pruner",
+        daemon=True,
+    )
+    _prune_thread.start()
+    jlog(logger, event="session_prune_loop_spawned")
 
 
 def stop_pruner() -> None:
     global _prune_thread
-    with _prune_lock:
-        thread = _prune_thread
-        jlog(logger, event="session_prune_loop_stop_requested")
+    if _prune_thread and _prune_thread.is_alive():
         _prune_stop.set()
-        if thread and thread.is_alive():
-            thread.join(timeout=5)
-            if thread.is_alive():
-                jlog(logger, level="WARN", event="session_prune_loop_stop_timeout")
-            else:
-                jlog(logger, event="session_prune_loop_joined")
-        else:
-            jlog(logger, event="session_prune_loop_not_running")
-        _prune_thread = None
-        _prune_stop.clear()
+        _prune_thread.join(timeout=5)
+        jlog(logger, event="session_prune_loop_joined")
+    else:
+        jlog(logger, event="session_prune_loop_not_running")
+    _prune_thread = None
+    _prune_stop.clear()
 
 
 CHROMA_CONFIG = ChromaConfig(url=CHROMA_URL, collection_name=COLLECTION_NAME)
@@ -561,7 +549,7 @@ async def lifespan(app: FastAPI):
         auto_config_allowed=auto_config_enabled,
     )
     set_server(server)
-    _start_pruner_if_needed()
+    start_pruner()
     try:
         await reload_clients_from_options(dict(CURRENT_OPTIONS))
         await update_bootstrap_state(force_refresh=True)
@@ -778,67 +766,51 @@ async def relay_chat_completions(request: Request):
 
     # Read body once for upstream reuse
     body_bytes = await request.body()
-    model = None
+    model: Optional[str] = None
     if body_bytes:
         try:
             payload = json.loads(body_bytes)
+            if isinstance(payload, dict):
+                model = payload.get("model")
         except Exception:
-            payload = None
-        if isinstance(payload, dict):
-            model = payload.get("model")
+            model = None
 
-    # Route to the correct base similarly to model listing
+    # Select upstream base using the same routing logic as model listing
     target_base = await _route_for_model(model) if model else list(LM_HOSTS.values())[0]
     url = f"{target_base.rstrip('/')}/v1/chat/completions"
 
-    # Forward headers for SSE
-    fwd_headers = {
-        "Content-Type": "application/json",
-        "Accept": "text/event-stream",
-    }
+    # Forward minimal headers for SSE
+    fwd_headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
     auth = request.headers.get("authorization")
     if auth:
         fwd_headers["Authorization"] = auth
 
-    try:
-        # No read timeout for streaming; we detect client disconnects ourselves
-        async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream(
-                "POST",
-                url,
-                headers=fwd_headers,
-                content=body_bytes,
-            ) as upstream:
-
-                async def forward():
-                    saw_done = False
-                    agen = upstream.aiter_raw()
-                    while True:
+    async def stream_sse():
+        saw_done = False
+        try:
+            async with httpx.AsyncClient(timeout=None) as client:
+                async with client.stream("POST", url, headers=fwd_headers, content=body_bytes) as upstream:
+                    async for chunk in upstream.aiter_raw():
                         if await request.is_disconnected():
                             jlog(logger, event="chat_relay_client_disconnected", url=url)
                             break
-                        try:
-                            chunk = await agen.__anext__()
-                        except StopAsyncIteration:
-                            break
-                        else:
+                        if chunk:
                             if b"[DONE]" in chunk:
                                 saw_done = True
                             yield chunk
-                    if not saw_done:
-                        # Guarantee the sentinel to keep A-LLM clients happy
-                        yield b"data: [DONE]\n\n"
+        except httpx.StreamClosed:
+            # Treat as clean EOF from upstream
+            pass
+        except httpx.HTTPError as exc:
+            jlog(logger, level="ERROR", event="chat_relay_upstream_error", url=url, error=str(exc))
+            # Propagate a 502 after the response starts would raise, so only raise before yield
+            raise HTTPException(status_code=502, detail="upstream_http_error") from exc
+        finally:
+            if not saw_done and not await request.is_disconnected():
+                # Guarantee OpenAI-style terminator for clients that expect it
+                yield b"data: [DONE]\n\n"
 
-                return StreamingResponse(forward(), media_type="text/event-stream")
-    except httpx.HTTPError as exc:
-        jlog(
-            logger,
-            level="ERROR",
-            event="chat_relay_upstream_error",
-            url=url,
-            error=str(exc),
-        )
-        raise HTTPException(status_code=502, detail="upstream_http_error") from exc
+    return StreamingResponse(stream_sse(), media_type="text/event-stream")
 
 
 @app.post("/v1/embeddings")

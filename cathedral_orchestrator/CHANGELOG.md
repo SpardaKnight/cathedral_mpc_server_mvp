@@ -1,5 +1,12 @@
 # Cathedral Orchestrator – Changelog
 
+## [0.1.4]
+- Fix streaming relay to treat httpx.StreamClosed as a clean EOF and always emit `data: [DONE]`.
+- Remove idle read timeouts in the SSE path and keep a pure pass-through using `aiter_raw`.
+- Maintain Authorization forwarding and `Accept: text/event-stream`.
+- Keep upstream selection unified with the catalog routing used by `/v1/models`.
+- Make the session prune scheduler idempotent to avoid "threads can only be started once" errors during reloads.
+
 ## [0.1.3]
 - Fix `/v1/chat/completions` to stream with a true SSE pass-through using `aiter_raw`, forward Authorization, and guarantee `[DONE]` on silent upstream termination.
 - Unify upstream base selection with the same routing used for model listing so the relay honors the configured LM host catalog.
