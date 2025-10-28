@@ -28,8 +28,29 @@ APP_CLIENTS: Dict[str, httpx.AsyncClient] = {}
 OPTIONS_PATH = Path(os.environ.get("CATHEDRAL_OPTIONS_PATH", "/data/options.json"))
 OPTIONS_LOCK = asyncio.Lock()
 
-# Host -> model_id -> metadata (context_length, embedding_length, etc.)
-MODEL_META: Dict[str, Dict[str, Dict[str, Any]]] = {}
+# Cache of upstream model object payloads (as returned by LM Studio/OpenAI style)
+MODEL_OBJECTS: Dict[str, List[Dict[str, Any]]] = {}
+
+
+def _normalize_lm_hosts(raw: Any) -> Dict[str, str]:
+    """
+    Accepts list[str] or dict[str,str]; returns dict of clean base URLs without '/v1'.
+    Ensures no trailing slash so later joins of '/v1/...' are correct.
+    """
+    result: Dict[str, str] = {}
+    if isinstance(raw, dict):
+        items = list(raw.items())
+    else:
+        seq = list(raw or [])
+        items = [(str(i), str(i)) for i in seq]
+    for key, url in items:
+        if not url:
+            continue
+        base = str(url).strip().rstrip("/")
+        if base.lower().endswith("/v1"):
+            base = base[:-3]  # strip '/v1'
+        result[str(key)] = base
+    return result
 
 
 def load_options_from_disk() -> Dict[str, Any]:
@@ -60,43 +81,6 @@ def persist_options_to_disk(options: Dict[str, Any]) -> None:
         jlog(logger, level="ERROR", event="options_write_failed", error=str(exc))
         print(f"[orchestrator] Failed to persist options: {exc}")
         raise
-
-
-def _strip_v1_suffix(url: str) -> str:
-    """Remove trailing /v1 or /v1/ from a base URL."""
-    u = url.rstrip("/")
-    if u.lower().endswith("/v1"):
-        u = u[:-3]
-    return u
-
-
-def _normalize_lm_hosts(raw: Any) -> Dict[str, str]:
-    """
-    Accepts list[str] or dict[str, str]. Returns dict[id->base] where base has no trailing slash
-    and never includes '/v1'. Keys are stable UUID-like labels when source lacks keys.
-    """
-    out: Dict[str, str] = {}
-    if isinstance(raw, dict):
-        for k, v in raw.items():
-            if not isinstance(v, str):
-                continue
-            base = _strip_v1_suffix(v).rstrip("/")
-            if base:
-                out[str(k)] = base
-    elif isinstance(raw, list):
-        for v in raw:
-            if not isinstance(v, str):
-                continue
-            base = _strip_v1_suffix(v).rstrip("/")
-            if base:
-                out[str(uuid.uuid4())] = base
-    elif isinstance(raw, str) and raw:
-        base = _strip_v1_suffix(raw).rstrip("/")
-        if base:
-            out["primary"] = base
-    return out
-
-
 async def list_models_from_host(client: httpx.AsyncClient, base: str) -> Tuple[str, List[Dict[str, Any]]]:
     """
     Query <base>/v1/models and return the raw 'data' list items unmodified.
@@ -127,59 +111,6 @@ async def list_models_from_host(client: httpx.AsyncClient, base: str) -> Tuple[s
         models=len(items),
     )
     return base_clean, items
-
-
-def _coerce_int(value: Any) -> Optional[int]:
-    try:
-        if isinstance(value, bool):
-            return None
-        if isinstance(value, (int, float)):
-            candidate = int(value)
-            return candidate if candidate > 0 else None
-        if isinstance(value, str) and value.strip():
-            candidate = int(float(value))
-            return candidate if candidate > 0 else None
-    except (TypeError, ValueError):
-        return None
-    return None
-
-
-def _normalize_model_token_limits(model: Dict[str, Any]) -> Dict[str, Any]:
-    normalized = dict(model)
-
-    context_candidates = [
-        normalized.get("context_window"),
-        normalized.get("context_length"),
-        normalized.get("contextLength"),
-        normalized.get("max_context_length"),
-    ]
-    context_window: Optional[int] = None
-    for candidate in context_candidates:
-        context_window = _coerce_int(candidate)
-        if context_window is not None:
-            break
-    if context_window is None:
-        context_window = 8192
-    normalized["context_window"] = context_window
-
-    max_token_candidates = [
-        normalized.get("max_tokens"),
-        normalized.get("max_output_tokens"),
-        normalized.get("max_token_count"),
-        normalized.get("maxTokenCount"),
-        normalized.get("max_new_tokens"),
-        context_window,
-    ]
-    max_tokens: Optional[int] = None
-    for candidate in max_token_candidates:
-        max_tokens = _coerce_int(candidate)
-        if max_tokens is not None:
-            break
-    if max_tokens is None:
-        max_tokens = context_window or 8192
-    normalized["max_tokens"] = max_tokens
-
-    return normalized
 
 
 def build_model_index(
@@ -302,6 +233,7 @@ else:
     CURRENT_OPTIONS = dict(DEFAULT_OPTIONS)
 
 LM_HOSTS: Dict[str, str] = _normalize_lm_hosts(CURRENT_OPTIONS.get("lm_hosts"))
+CURRENT_OPTIONS["lm_hosts"] = list(LM_HOSTS.values())
 CHROMA_MODE: str = "http"
 CHROMA_URL: str = CURRENT_OPTIONS.get("chroma_url", "http://127.0.0.1:8000")
 COLLECTION_NAME: str = CURRENT_OPTIONS.get("collection_name", "cathedral")
@@ -405,6 +337,7 @@ async def reload_clients_from_options(
     CURRENT_OPTIONS.setdefault("upserts_active", UPSERTS_ACTIVE)
 
     LM_HOSTS = _normalize_lm_hosts(options.get("lm_hosts", LM_HOSTS))
+    CURRENT_OPTIONS["lm_hosts"] = list(LM_HOSTS.values())
     requested_mode = str(options.get("chroma_mode", CHROMA_MODE)).lower()
     if requested_mode != "http":
         jlog(
@@ -482,158 +415,52 @@ async def reload_clients_from_options(
 
 
 async def _refresh_model_catalog() -> None:
-    global MODEL_CATALOG, HOST_HEALTH, MODEL_META
+    """
+    Populate both:
+      - MODEL_CATALOG: {host: [id, ...]}
+      - MODEL_OBJECTS: {host: [<raw model dict>, ...]}
+    keeping host health in sync.
+    """
+    global MODEL_CATALOG, MODEL_OBJECTS, HOST_HEALTH
     hosts = [host.rstrip("/") for host in LM_HOSTS.values()]
     if not hosts:
         MODEL_CATALOG = {}
+        MODEL_OBJECTS = {}
         HOST_HEALTH = {}
-        MODEL_META = {}
         jlog(logger, event="model_catalog_empty")
         return
-
     client = APP_CLIENTS.get("lm")
     if client is None:
         jlog(logger, level="WARN", event="model_catalog_client_missing")
         return
-
     tasks = [list_models_from_host(client, host) for host in hosts]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Try to harvest LM Studio metadata for context_length/max_context_length
-    meta_tasks = [fetch_lmstudio_model_meta(client, host) for host in hosts]
-    meta_results = await asyncio.gather(*meta_tasks, return_exceptions=True)
-
-    # Keep a compact readiness catalog of IDs, but do not lose the full objects at the API layer.
-    catalog: Dict[str, List[str]] = {}
+    new_ids: Dict[str, List[str]] = {}
+    new_objs: Dict[str, List[Dict[str, Any]]] = {}
     health: Dict[str, str] = {}
-    meta_by_host: Dict[str, Dict[str, Dict[str, Any]]] = {}
-
-    for host, meta_result in zip(hosts, meta_results):
-        host_key = host.rstrip("/")
-        if isinstance(meta_result, BaseException):
-            meta_by_host[host_key] = {}
-            jlog(
-                logger,
-                level="WARN",
-                event="lmstudio_meta_gather_failed",
-                host=host_key,
-                error=str(meta_result),
-            )
-        else:
-            meta_by_host[host_key] = meta_result or {}
 
     for host, result in zip(hosts, results):
-        host_key = host.rstrip("/")
         if isinstance(result, BaseException):
-            catalog[host_key] = []
-            health[host_key] = "down"
-            jlog(
-                logger,
-                level="WARN",
-                event="model_catalog_gather_failed",
-                host=host_key,
-                error=str(result),
-            )
+            new_ids[host] = []
+            new_objs[host] = []
+            health[host] = "down"
+            jlog(logger, level="WARN", event="model_catalog_gather_failed", host=host, error=str(result))
             continue
+        base, payload = cast(Tuple[str, List[Dict[str, Any]]], result)
+        clean = base.rstrip("/")
+        # Trust upstream objects; derive ids for routing
+        obj_list: List[Dict[str, Any]] = [obj for obj in payload if isinstance(obj, dict)]
+        ids = [str(obj.get("id") or obj.get("name")) for obj in obj_list if (obj.get("id") or obj.get("name"))]
+        new_objs[clean] = obj_list
+        new_ids[clean] = ids
+        health[clean] = "ok" if ids else "down"
+        jlog(logger, event="model_catalog_host", host=clean, models=len(ids), status=health[clean])
 
-        base, models_payload = cast(Tuple[str, List[Dict[str, Any]]], result)
-        ids: List[str] = []
-        for item in models_payload:
-            if isinstance(item, dict):
-                mid = item.get("id") or item.get("name")
-            else:
-                mid = str(item)
-            if mid:
-                ids.append(str(mid))
-        key = base.rstrip("/")
-        catalog[key] = ids
-        health_status = "ok" if ids else "down"
-        health[key] = health_status
-        jlog(
-            logger,
-            event="model_catalog_host",
-            host=key,
-            models=len(ids),
-            status=health_status,
-        )
-
-    MODEL_CATALOG = catalog
+    MODEL_CATALOG = new_ids
+    MODEL_OBJECTS = new_objs
     HOST_HEALTH = health
-    MODEL_META = meta_by_host
-    jlog(logger, event="model_catalog_refreshed", hosts=len(catalog))
-
-
-async def fetch_lmstudio_model_meta(
-    client: httpx.AsyncClient, base: str
-) -> Dict[str, Dict[str, Any]]:
-    """
-    Query LM Studio's metadata endpoint(s) to obtain per-model context sizes.
-    Returns mapping: model_id -> {"context_length": int, "max_context_length": int, "embedding_length": int, ...}
-    """
-    base = base.rstrip("/")
-    candidates = [
-        f"{base}/api/v0/models",  # LM Studio REST (preferred)
-        f"{base}/models",  # Some older builds expose a plain /models
-    ]
-    for url in candidates:
-        try:
-            resp = await client.get(url, follow_redirects=True, timeout=20)
-            if resp.status_code != 200:
-                continue
-            data = resp.json() or {}
-            model_meta: Dict[str, Dict[str, Any]] = {}
-            buckets: List[List[Dict[str, Any]]] = []
-            for key in ("loaded", "downloaded", "models", "data"):
-                val = data.get(key) if isinstance(data, dict) else None
-                if isinstance(val, list):
-                    buckets.append(val)
-            if not buckets and isinstance(data, list):
-                buckets = [data]
-            for bucket in buckets:
-                for item in bucket:
-                    if not isinstance(item, dict):
-                        continue
-                    mid = (
-                        item.get("name")
-                        or item.get("id")
-                        or item.get("model")
-                        or item.get("model_id")
-                    )
-                    if not mid:
-                        continue
-                    ctx = (
-                        item.get("max_context_length")
-                        or item.get("context_length")
-                        or item.get("contextLength")
-                        or item.get("context_window")
-                    )
-                    emb = item.get("embedding_length") or item.get("embeddingLength") or None
-                    meta: Dict[str, Any] = {}
-                    if isinstance(ctx, int):
-                        meta["context_length"] = ctx
-                        meta["max_context_length"] = ctx
-                        meta["max_input_tokens"] = ctx
-                        meta["context_window"] = ctx
-                    if isinstance(emb, int):
-                        meta["embedding_length"] = emb
-                    if meta:
-                        model_meta[str(mid)] = meta
-            jlog(
-                logger,
-                event="lmstudio_meta_harvest",
-                host=base,
-                models=len(model_meta),
-            )
-            return model_meta
-        except Exception as exc:  # pragma: no cover
-            jlog(
-                logger,
-                level="WARN",
-                event="lmstudio_meta_probe_error",
-                url=url,
-                error=str(exc),
-            )
-    return {}
+    jlog(logger, event="model_catalog_refreshed", hosts=len(MODEL_CATALOG))
 
 
 def is_bootstrap_ready() -> bool:
@@ -887,7 +714,10 @@ async def api_set_options(request: Request) -> JSONResponse:
                 field=key,
             )
             continue
-        filtered_body[key] = value
+        if key == "lm_hosts":
+            filtered_body[key] = list(_normalize_lm_hosts(value).values())
+        else:
+            filtered_body[key] = value
 
     merged = {**DEFAULT_OPTIONS, **CURRENT_OPTIONS, **filtered_body}
     try:
@@ -920,54 +750,23 @@ async def api_set_options(request: Request) -> JSONResponse:
 
 @app.get("/v1/models")
 async def models_v1(_request: Request) -> JSONResponse:
-    if not LM_HOSTS:
-        raise HTTPException(status_code=503, detail="no lm hosts configured")
-    client = APP_CLIENTS.get("lm")
-    if client is None:
-        raise HTTPException(status_code=503, detail="client not ready")
-    bases = list(LM_HOSTS.values())
-    tasks = [list_models_from_host(client, base) for base in bases]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    """
+    Union of upstream model OBJECTS, not just ids.
+    Preserve all fields so clients (AnythingLLM) can auto-detect context window.
+    """
+    # Snapshot to avoid mutation during iteration
+    objs = dict(MODEL_OBJECTS)
+    union: List[Dict[str, Any]] = []
     seen: set[str] = set()
-    aggregated: List[Dict[str, Any]] = []
-    failures = 0
-    for base, res in zip(bases, results):
-        if isinstance(res, BaseException):
-            failures += 1
-            jlog(
-                logger,
-                level="WARN",
-                event="models_v1_upstream_failed",
-                host=base.rstrip("/"),
-                error=str(res),
-            )
-            continue
-        _, items = cast(Tuple[str, List[Dict[str, Any]]], res)
+    for items in objs.values():
         for obj in items:
-            mid = (
-                str(obj.get("id") or obj.get("name") or "")
-                if isinstance(obj, dict)
-                else str(obj)
-            )
-            if not mid:
+            mid = str(obj.get("id") or obj.get("name") or "")
+            if not mid or mid in seen:
                 continue
-            if mid in seen:
-                continue
-            normalized = (
-                _normalize_model_token_limits(obj)
-                if isinstance(obj, dict)
-                else obj
-            )
-            aggregated.append(normalized)
             seen.add(mid)
-    jlog(
-        logger,
-        event="models_v1_passthrough",
-        hosts=len(bases),
-        models=len(aggregated),
-        failures=failures,
-    )
-    return JSONResponse({"object": "list", "data": aggregated})
+            # Do not mutate upstream payload; shallow copy in case we annotate later
+            union.append(dict(obj))
+    return JSONResponse({"object": "list", "data": union})
 
 
 @app.get("/api/v0/models")
@@ -1006,20 +805,36 @@ async def models_v0_aggregate(_request: Request):
 
     loaded: List[Dict[str, Any]] = []
     catalog = await _catalog_provider()
+    objects_snapshot = {host: list(objs) for host, objs in MODEL_OBJECTS.items()}
     for host, models in catalog.items():
-        meta = MODEL_META.get(host.rstrip("/"), {}) if isinstance(MODEL_META, dict) else {}
+        host_key = host.rstrip("/")
+        obj_index: Dict[str, Dict[str, Any]] = {}
+        for raw_obj in objects_snapshot.get(host_key, []):
+            if isinstance(raw_obj, dict):
+                mid = raw_obj.get("id") or raw_obj.get("name")
+                if mid:
+                    obj_index[str(mid)] = raw_obj
         for mid in models:
             item: Dict[str, Any] = {
                 "name": mid,
                 "state": "loaded",
                 "provider": "upstream",
             }
-            m = meta.get(mid, {})
-            if "context_length" in m:
-                item["context_length"] = int(m["context_length"])
-                item["max_context_length"] = int(m["context_length"])
-            if "embedding_length" in m:
-                item["embedding_length"] = int(m["embedding_length"])
+            obj_data = obj_index.get(mid)
+            if isinstance(obj_data, dict):
+                if "context_length" in obj_data:
+                    item["context_length"] = int(obj_data["context_length"])
+                    item["max_context_length"] = int(obj_data["context_length"])
+                if "max_context_length" in obj_data and "max_context_length" not in item:
+                    try:
+                        item["max_context_length"] = int(obj_data["max_context_length"])
+                    except (TypeError, ValueError):
+                        pass
+                if "embedding_length" in obj_data:
+                    try:
+                        item["embedding_length"] = int(obj_data["embedding_length"])
+                    except (TypeError, ValueError):
+                        pass
             loaded.append(item)
     jlog(
         logger,

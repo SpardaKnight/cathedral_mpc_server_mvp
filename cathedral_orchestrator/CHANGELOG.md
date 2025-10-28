@@ -1,5 +1,12 @@
 # Cathedral Orchestrator – Changelog
 
+## [0.2.4]
+- Return a faithful pass-through of LM Studio `/v1/models` data and preserve all upstream fields so clients can auto-detect token/window limits.
+- Normalize `lm_hosts` by stripping trailing `/v1` and extra slashes to prevent `/v1/v1/...` path errors and intermittent connectivity failures.
+- Keep the raw SSE chat relay from 0.2.x, forwarding `Authorization` and guaranteeing `data: [DONE]`.
+- Package `PyYAML` to resolve rare boot errors (`ModuleNotFoundError: yaml`).
+- Bump Supervisor manifests to 0.2.4 so the update surfaces in Home Assistant.
+
 ## [0.2.3]
 - Normalize `/v1/models` responses so context window and max token metadata flow from LM Studio (with Llama 3 70B defaults when missing) to keep AnythingLLM auto-detect accurate.
 - Bump manifests to 0.2.3 for Supervisor visibility.

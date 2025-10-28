@@ -2,4 +2,4 @@ httpx>=0.25
 fastapi>=0.110
 uvicorn>=0.23
 aiosqlite>=0.19
-PyYAML>=6.0
+PyYAML>=6.0.2
