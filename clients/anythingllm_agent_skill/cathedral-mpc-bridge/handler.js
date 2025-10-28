@@ -1,7 +1,6 @@
-// Cathedral MPC Bridge — AnythingLLM Agent Skill (Desktop)
-// Runs inside AnythingLLM's Node runtime. No servers. Connects out to HA MPC (ws://.../mcp).
-// Provides deterministic .env read/write via MPC config.read/config.write.
-// Auto-starts on load so enabling the skill spins up the bridge immediately.
+// Cathedral MPC Bridge - AnythingLLM Agent Skill (Desktop)
+// Connects to HA MPC ws://.../mcp and provides deterministic .env read/write.
+// Auto-starts on load. Exposes a runtime.handler so the Agent can call it.
 
 "use strict";
 
@@ -12,24 +11,15 @@ const http = require("node:http");
 const https = require("node:https");
 const crypto = require("node:crypto");
 
-// Try to obtain a WebSocket implementation:
-// 1) global WebSocket if present
-// 2) 'ws' if the desktop runtime bundles it
-let WSImpl = null;
-try { WSImpl = (globalThis && globalThis.WebSocket) ? globalThis.WebSocket : require("ws"); } catch {}
-
-// ── CONFIG (single placeholder) ─────────────────────────────────────────────────
-const ORCH_URL = "ws://homeassistant.local:5005/mcp"; // exact MPC path
-const AUTH = "Bearer <YOUR_LONG_LIVED_TOKEN_HERE>";   // << insert HA token; keep 'Bearer ' prefix
-const WORKSPACE = "anythingllm_desktop";
-const CLIENT = "anythingllm/agent-skill";
-const VERSION = "v1";
-const HEARTBEAT_MS = 30000;
-// ───────────────────────────────────────────────────────────────────────────────
+const NativeWS = typeof WebSocket !== "undefined" ? WebSocket : null;
+let WS = NativeWS;
+if (!WS) { try { WS = require("ws"); } catch { WS = null; } }
 
 function log(level, msg) {
-  try { console.log(`[Cathedral-MPC-Bridge][${level}] ${msg}`); } catch {}
+  const ts = new Date().toISOString();
+  console.log(`[Cathedral-MPC-Bridge][${level}] ${ts} ${msg}`);
 }
+function uid(prefix) { return `${prefix}-${crypto.randomBytes(8).toString("hex")}`; }
 
 function storageDir() {
   if (process.platform === "win32") {
@@ -59,173 +49,119 @@ function readEnv() {
     return out;
   } catch { return {}; }
 }
-
 function needsQuotes(v) { return /\s|["'#]/.test(v); }
-
 function writeEnvAtomically(map) {
-  const header = [
-    "# AnythingLLM .env (managed by Cathedral MPC Bridge)",
-    `# Last update: ${new Date().toISOString()}`
-  ];
-  const keys = Object.keys(map).sort((a,b)=>a.localeCompare(b));
-  const lines = header.concat(keys.map(k => `${k}=${needsQuotes(map[k] ?? "") ? JSON.stringify(String(map[k] ?? "")) : String(map[k] ?? "")}`));
-  const tmp = ENV_PATH + ".tmp";
-  fs.writeFileSync(tmp, lines.join(os.EOL), "utf8");
+  const lines = Object.keys(map).map(k => {
+    const v = String(map[k] ?? "");
+    return `${k}=${needsQuotes(v) ? JSON.stringify(v) : v}`;
+  });
+  const tmp = `${ENV_PATH}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmp, lines.join("\n"), "utf8");
   fs.renameSync(tmp, ENV_PATH);
 }
-
-function normalize(map) {
-  const norm = k => (map[k] ?? "").toString().trim();
-  return {
-    LMSTUDIO_BASE_PATH: norm("LMSTUDIO_BASE_PATH"),
-    EMBEDDING_BASE_PATH: norm("EMBEDDING_BASE_PATH"),
-    CHROMA_URL:          norm("CHROMA_URL"),
-    VECTOR_DB:           norm("VECTOR_DB"),
-    STORAGE_DIR:         storageDir(),
-    orchestrator_upserts_only: true
-  };
+function normalize(obj) {
+  const out = {};
+  const keys = ["LMSTUDIO_BASE_PATH","EMBEDDING_BASE_PATH","CHROMA_URL","VECTOR_DB","STORAGE_DIR"];
+  for (const k of keys) if (obj[k]) out[k] = obj[k].trim();
+  out.orchestrator_upserts_only = true;
+  return out;
 }
-
-function uid(prefix) { return `${prefix}_${crypto.randomBytes(8).toString("hex")}`; }
-function wsSend(ws, obj) { try { ws.send(JSON.stringify(obj)); } catch {} }
-
-async function httpJson(url, timeoutMs) {
+function httpJson(url, timeoutMs = 3000) {
   return new Promise((resolve) => {
-    try {
-      const lib = url.startsWith("https") ? https : http;
-      const req = lib.get(url, { timeout: timeoutMs || 3000 }, (res) => {
-        if ((res.statusCode || 500) >= 400) { res.resume(); return resolve(null); }
-        const chunks = [];
-        res.on("data", d => chunks.push(Buffer.isBuffer(d) ? d : Buffer.from(d)));
-        res.on("end", () => {
-          try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))); }
-          catch { resolve(null); }
-        });
-      });
-      req.on("timeout", () => { try { req.destroy(new Error("timeout")); } catch {} });
-      req.on("error", () => resolve(null));
-    } catch { resolve(null); }
+    const mod = url.startsWith("https") ? https : http;
+    const req = mod.get(url, { timeout: timeoutMs }, (res) => {
+      let buf = ""; res.setEncoding("utf8");
+      res.on("data", (c) => buf += c);
+      res.on("end", () => { try { resolve(JSON.parse(buf)); } catch { resolve(null); } });
+    });
+    req.on("error", () => resolve(null));
+    req.on("timeout", () => { try { req.destroy(); } catch {} resolve(null); });
   });
 }
 
-function startBridge() {
-  if (!WSImpl) { log("error","No WebSocket impl available in this Node runtime."); return; }
+const ORCH_URL = process.env.CATHEDRAL_MPC_URL || "ws://homeassistant.local:5005/mcp";
+const AUTH = process.env.CATHEDRAL_MPC_TOKEN || "Bearer <SET_YOUR_HA_LONG_LIVED_TOKEN>";
+const CLIENT = "anythingllm/desktop";
+const VERSION = "v1.0";
 
-  let ws = null;
-  let hb = null;
-  let backoff = 1000;
+function wsSend(ws, payload) { try { ws.send(JSON.stringify(payload)); } catch {} }
 
-  const connect = () => {
-    try {
-      ws = new WSImpl(ORCH_URL, { headers: { "Authorization": AUTH } });
-    } catch (e) {
-      log("error", `WebSocket ctor failed: ${e && e.message || e}`); scheduleReconnect(); return;
-    }
+let ws = null;
+let inFlight = null;
+let backoff = 1000;
 
-    ws.onopen = async () => {
-      log("info", `Connected to ${ORCH_URL}`);
-      backoff = 1000;
+function connect() {
+  if (!WS) { log("error", "No WebSocket available"); return; }
+  try {
+    ws = new WS(ORCH_URL, { headers: { Authorization: AUTH, "User-Agent": "Cathedral-MPC-Bridge" } });
+  } catch (e) { log("error", `Failed to construct WebSocket: ${e?.message || e}`); return; }
 
-      // Handshake
-      wsSend(ws, {
-        id: uid("hello"),
-        type: "mcp.request",
-        scope: "handshake",
-        headers: {
-          authorization: AUTH,
-          workspace_id: WORKSPACE,
-          client: CLIENT,
-          client_version: VERSION
-        },
-        body: { capabilities: ["config.read","config.write","session.*","memory.*"], orchestrator_upserts_only: true }
-      });
-      log("info","Handshake sent.");
-
-      // Proactive config.read.result after 2s
-      setTimeout(async () => {
-        if (!ws || ws.readyState !== 1) return;
-        const body = normalize(readEnv());
-        try {
-          const base = body.LMSTUDIO_BASE_PATH;
-          if (base) {
-            const u = (base.endsWith("/v1") ? base : (base.replace(/\/+$/,"") + "/v1")) + "/models";
-            const data = await httpJson(u, 2500);
-            if (data && Array.isArray(data.data)) body.models_count = data.data.length;
-          }
-        } catch {}
-        wsSend(ws, { type: "mcp.event", scope: "config.read.result", headers: { workspace_id: WORKSPACE }, body });
-        log("info","Initial config.read.result pushed.");
-      }, 2000);
-
-      // Heartbeat
-      if (hb) clearInterval(hb);
-      hb = setInterval(() => {
-        if (ws && ws.readyState === 1) {
-          wsSend(ws, { type:"mcp.event", scope:"heartbeat", headers:{ workspace_id: WORKSPACE }, body:{ ts:new Date().toISOString() } });
+  ws.onopen = async () => {
+    log("info", `Connected to ${ORCH_URL}`); backoff = 1000;
+    wsSend(ws, {
+      id: uid("hello"), type: "mcp.request", scope: "handshake",
+      headers: { authorization: AUTH, workspace_id: "ws_anythingllm", client: CLIENT, client_version: VERSION },
+      body: { capabilities: ["config.read","config.write","session.*","memory.*"], orchestrator_upserts_only: true }
+    });
+    setTimeout(async () => {
+      if (!ws || ws.readyState !== 1) return;
+      const body = normalize(readEnv());
+      try {
+        const base = body.LMSTUDIO_BASE_PATH;
+        if (base) {
+          const u = (base.endsWith("/v1") ? base : (base.replace(/\/+$/,"") + "/v1")) + "/models";
+          const data = await httpJson(u, 2500);
+          if (data && Array.isArray(data.data)) body.models_count = data.data.length;
         }
-      }, HEARTBEAT_MS);
-    };
-
-    ws.onmessage = (ev) => {
-      let msg = null;
-      try { msg = JSON.parse(ev.data?.toString?.() ?? ev.data); } catch { return; }
-      if (!msg || msg.type !== "mcp.request") return;
-
-      // Handle config.read
-      if (msg.scope === "config.read") {
-        const body = normalize(readEnv());
-        wsSend(ws, { id: msg.id, type: "mcp.response", scope: "config.read", ok: true, body });
-        log("info","config.read served.");
-        return;
-      }
-
-      // Handle config.write
-      if (msg.scope === "config.write") {
-        try {
-          const ALLOW = new Set(["LMSTUDIO_BASE_PATH","EMBEDDING_BASE_PATH","CHROMA_URL","VECTOR_DB"]);
-          const updates = msg.body?.updates || {};
-          const map = readEnv();
-          let changed = false;
-          for (const [k,v] of Object.entries(updates)) {
-            if (!ALLOW.has(k)) continue;
-            if (typeof v !== "string") continue;
-            if (map[k] !== v) { map[k] = v; changed = true; }
-          }
-          if (changed) writeEnvAtomically(map);
-          wsSend(ws, { id: msg.id, type: "mcp.response", scope: "config.write", ok: true, body: normalize(map) });
-          log("info", `config.write applied: ${Object.keys(updates).join(", ") || "(none)"}`);
-        } catch (err) {
-          wsSend(ws, { id: msg.id, type: "mcp.response", scope: "config.write", ok: false, error: { code: "WRITE_FAIL", message: err?.message || String(err) } });
-          log("error", `config.write failed: ${err?.message || err}`);
-        }
-        return;
-      }
-
-      // Other scopes are handled on the Orchestrator side.
-    };
-
-    ws.onclose = () => {
-      log("warn","MCP socket closed.");
-      if (hb) { clearInterval(hb); hb = null; }
-      scheduleReconnect();
-    };
-    ws.onerror = (err) => { log("error", `WebSocket error: ${err?.message || String(err)}`); };
+      } catch {}
+      wsSend(ws, { id: uid("config.push"), type: "mcp.event", scope: "config.read.result", body });
+    }, 2000);
   };
 
-  function scheduleReconnect() {
-    setTimeout(connect, backoff);
-    backoff = Math.min(backoff * 2, 30000);
-  }
+  ws.onmessage = (evt) => {
+    let msg = {}; try { msg = JSON.parse(evt.data); } catch { return; }
+    if (msg.type !== "mcp.request") return;
+    const scope = msg.scope || "";
+    if (scope === "config.read") {
+      const body = normalize(readEnv());
+      wsSend(ws, { id: msg.id || uid("config.read"), type: "mcp.response", ok: true, body });
+    } else if (scope === "config.write") {
+      try {
+        const updates = msg.body?.updates || {};
+        const current = readEnv();
+        for (const [k, v] of Object.entries(updates)) current[k] = String(v ?? "");
+        writeEnvAtomically(current);
+        const body = normalize(current);
+        wsSend(ws, { id: msg.id || uid("config.write"), type: "mcp.response", ok: true, body });
+      } catch (e) {
+        wsSend(ws, { id: msg.id || uid("config.write"), type: "mcp.response", ok: false, error: { code: "WRITE_FAIL", message: e?.message || String(e) } });
+      }
+    }
+  };
 
-  connect();
+  ws.onclose = () => { log("warn", "Socket closed"); ws = null; setTimeout(connect, backoff); backoff = Math.min(backoff * 2, 30000); };
+  ws.onerror = (err) => { log("error", `Socket error: ${err?.message || err}`); };
 }
 
-// Auto-start the bridge on plugin load
+function startBridge() { if (inFlight) return; inFlight = true; connect(); }
 try { startBridge(); } catch (e) { log("error", `Bridge init failed: ${e?.message || e}`); }
 
-// AnythingLLM Agent Skill contract: export at least one callable that returns a string.
-// These are NO-OP commands used for health/status; the bridge runs automatically on load.
-module.exports = {
-  status: async () => "[Cathedral-MPC-Bridge] running",
-  restart: async () => { startBridge(); return "[Cathedral-MPC-Bridge] restart signal sent"; }
+module.exports.runtime = {
+  handler: async function ({ command }) {
+    const action = String(command || "status").toLowerCase();
+    const caller = `${this.config.name}-v${this.config.version}`;
+    try {
+      this.introspect(`${caller} invoked with command=${action}`);
+      if (action === "restart") {
+        if (ws && ws.terminate) { try { ws.terminate(); } catch {} }
+        ws = null; inFlight = null; startBridge();
+        return "[Cathedral-MPC-Bridge] restart signal sent";
+      }
+      const env = normalize(readEnv());
+      return `[Cathedral-MPC-Bridge] running. ws=${ORCH_URL}. env.keys=${Object.keys(env).join(",")}`;
+    } catch (e) {
+      this.introspect(`${caller} failed: ${e?.message || e}`);
+      return `Bridge failed: ${e?.message || e}`;
+    }
+  }
 };

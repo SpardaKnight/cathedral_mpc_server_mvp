@@ -320,8 +320,9 @@ async def reload_clients_from_options(
     HOST_POOL = HostPool(LM_HOSTS)
 
     CHROMA_CONFIG = ChromaConfig(url=CHROMA_URL, collection_name=COLLECTION_NAME)
-    if CHROMA_CLIENT is not None:
-        CHROMA_CLIENT.update_config(CHROMA_CONFIG)
+    chroma_http = APP_CLIENTS.get("chroma")
+    if chroma_http is not None:
+        CHROMA_CLIENT = ChromaClient(chroma_http, CHROMA_CONFIG)
 
     try:
         server = get_server()
@@ -475,7 +476,7 @@ async def update_bootstrap_state(
         chroma_ready = chroma_ready_override
     else:
         if CHROMA_URL and CHROMA_CLIENT is not None:
-            chroma_ready = await CHROMA_CLIENT.health_ok()
+            chroma_ready = await CHROMA_CLIENT.health()
         elif CHROMA_URL:
             chroma_ready = False
         else:
@@ -506,7 +507,7 @@ async def get_readiness() -> Tuple[bool, bool, bool]:
     catalog_snapshot = dict(MODEL_CATALOG)
     lm_ready = any(models for models in catalog_snapshot.values())
     if CHROMA_URL and CHROMA_CLIENT is not None:
-        chroma_ready = await CHROMA_CLIENT.health_ok()
+        chroma_ready = await CHROMA_CLIENT.health()
     elif CHROMA_URL:
         chroma_ready = False
     else:
@@ -583,7 +584,7 @@ async def health():
     lm_ready = any(count > 0 for count in lm_counts.values())
     chroma_ok = True
     if CHROMA_URL:
-        chroma_ok = bool(CHROMA_CLIENT) and await CHROMA_CLIENT.health_ok()
+        chroma_ok = bool(CHROMA_CLIENT) and await CHROMA_CLIENT.health()
 
     await update_bootstrap_state(
         force_refresh=False,
