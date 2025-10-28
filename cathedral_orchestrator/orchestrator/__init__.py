@@ -1,1 +1,154 @@
-# Cathedral Orchestrator package
+"""Shared exports for the Cathedral Orchestrator package."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from copy import deepcopy
+from pathlib import Path
+from typing import Dict, Optional
+
+import yaml  # type: ignore[import]
+
+from .logging_config import jlog
+
+logger = logging.getLogger("cathedral")
+
+PERSONAS_DIR = Path("/data/personas")
+VOICE_HOST = "127.0.0.1"
+VOICE_PORT = 8181
+
+
+class PersonaManager:
+    """Load persona templates from disk and track mutable runtime state."""
+
+    def __init__(self) -> None:
+        self.personas: Dict[str, Dict[str, object]] = {}
+        self.active_states: Dict[str, Dict[str, object]] = {}
+        self.reload()
+
+    def reload(self) -> None:
+        self.personas.clear()
+        self.active_states.clear()
+        if PERSONAS_DIR.is_dir():
+            for entry in sorted(PERSONAS_DIR.iterdir()):
+                if entry.suffix.lower() not in {".yaml", ".yml", ".json"}:
+                    continue
+                try:
+                    with entry.open("r", encoding="utf-8") as handle:
+                        data = yaml.safe_load(handle) or {}
+                    if isinstance(data, dict):
+                        key = entry.stem
+                        self.personas[key] = data
+                        self.active_states[key] = deepcopy(data)
+                        jlog(
+                            logger,
+                            event="persona_loaded",
+                            persona_id=key,
+                            path=str(entry),
+                        )
+                except Exception as exc:  # pragma: no cover - defensive
+                    jlog(
+                        logger,
+                        level="ERROR",
+                        event="persona_load_failed",
+                        path=str(entry),
+                        error=str(exc),
+                    )
+
+        if "default" not in self.personas:
+            default_payload: Dict[str, object] = {
+                "name": "default",
+                "system_prompt": "",
+                "profile": {},
+            }
+            self.personas["default"] = default_payload
+            self.active_states["default"] = deepcopy(default_payload)
+            jlog(logger, event="persona_default_seeded")
+
+    def list_personas(self) -> Dict[str, Dict[str, object]]:
+        return dict(self.personas)
+
+    def get(self, persona_id: str, *, original: bool = False) -> Optional[Dict[str, object]]:
+        store = self.personas if original else self.active_states
+        persona = store.get(persona_id)
+        if persona is None and persona_id != "default":
+            persona = store.get("default")
+        return deepcopy(persona) if isinstance(persona, dict) else None
+
+    def reset(self, persona_id: str) -> bool:
+        if persona_id not in self.personas:
+            jlog(logger, level="WARN", event="persona_reset_missing", persona_id=persona_id)
+            return False
+        self.active_states[persona_id] = deepcopy(self.personas[persona_id])
+        jlog(logger, event="persona_reset", persona_id=persona_id)
+        return True
+
+
+class VoiceProxy:
+    """Minimal TCP proxy for Wyoming-compatible TTS services."""
+
+    def __init__(self, host: str = VOICE_HOST, port: int = VOICE_PORT) -> None:
+        self.host = host
+        self.port = port
+
+    async def synthesize(self, text: str) -> bytes:
+        payload = (text or "").encode("utf-8")
+        try:
+            reader, writer = await asyncio.open_connection(self.host, self.port)
+        except Exception as exc:  # pragma: no cover - network guard
+            jlog(
+                logger,
+                level="ERROR",
+                event="voice_proxy_connect_failed",
+                host=self.host,
+                port=self.port,
+                error=str(exc),
+            )
+            return b""
+
+        try:
+            writer.write(len(payload).to_bytes(4, "little") + payload)
+            await writer.drain()
+            chunks = []
+            while True:
+                chunk = await reader.read(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            audio = b"".join(chunks)
+            jlog(
+                logger,
+                event="voice_proxy_synthesized",
+                bytes=len(audio),
+                host=self.host,
+                port=self.port,
+            )
+            return audio
+        except Exception as exc:  # pragma: no cover - network guard
+            jlog(
+                logger,
+                level="ERROR",
+                event="voice_proxy_synthesize_failed",
+                error=str(exc),
+            )
+            return b""
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:  # pragma: no cover - cleanup guard
+                pass
+
+
+default_persona_manager = PersonaManager()
+persona_manager = default_persona_manager
+voice_proxy = VoiceProxy()
+
+__all__ = [
+    "PERSONAS_DIR",
+    "PersonaManager",
+    "VoiceProxy",
+    "persona_manager",
+    "voice_proxy",
+]

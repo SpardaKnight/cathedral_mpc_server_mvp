@@ -1,5 +1,11 @@
 # Cathedral Orchestrator – Changelog
 
+## [0.1.9]
+- Wire persona templates, agents reset support, and Wyoming-compatible voice proxy into the MPC server while advertising the voice.* scope.
+- Harden ToolBridge domain enforcement and error handling for Supervisor service calls.
+- Extend the AnythingLLM desktop bridge handshake to cover session/memory scopes and emit structured config.read.result frames.
+- Bump manifests to 0.1.9.
+
 ## [0.1.8]
 - Bump manifests to 0.1.8 so Supervisor surfaces the AnythingLLM skill and Chroma client fixes.
 

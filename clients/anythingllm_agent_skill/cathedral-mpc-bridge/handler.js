@@ -91,8 +91,34 @@ let _reconnectTimer = null;
 let _orchUrl = null;
 let _auth = null;
 
+const MPC_CAPABILITIES = ["config.read", "config.write", "session.*", "memory.*"];
+
 function wsSend(ws, obj) { try { ws.send(JSON.stringify(obj)); } catch {} }
 function uid(prefix) { return `${prefix}_${crypto.randomBytes(8).toString("hex")}`; }
+
+function readAnythingLLMEnv() {
+  const env = readEnvFile(ALLM_ENV_PATH);
+  return {
+    LMSTUDIO_BASE_PATH: env.LMSTUDIO_BASE_PATH || "",
+    EMBEDDING_BASE_PATH: env.EMBEDDING_BASE_PATH || "",
+    CHROMA_URL: env.CHROMA_URL || "",
+    VECTOR_DB: env.VECTOR_DB || "",
+    STORAGE_DIR: ALLM_STORAGE,
+    orchestrator_upserts_only: true
+  };
+}
+
+function sendConfigReadResult(ws, correlationId, isError) {
+  const body = readAnythingLLMEnv();
+  const message = {
+    id: correlationId || uid("cfgsync"),
+    type: correlationId ? "mcp.response" : "mcp.event",
+    scope: "config.read.result",
+    ok: !isError,
+    body
+  };
+  wsSend(ws, message);
+}
 
 function closeBridge() {
   try { if (_hb) clearInterval(_hb); } catch {}
@@ -135,21 +161,12 @@ function connect(params) {
       type: "mcp.request",
       scope: "handshake",
       headers: { authorization: _auth, workspace_id: "anythingllm_desktop", client: "anythingllm/agent-skill", client_version: "v1" },
-      body: { capabilities: ["config.read","config.write"] }
+      body: { capabilities: MPC_CAPABILITIES, orchestrator_upserts_only: true }
     });
     // Push initial config.read.result shortly after connect
     setTimeout(() => {
       try {
-        const env = readEnvFile(ALLM_ENV_PATH);
-        const body = {
-          LMSTUDIO_BASE_PATH: env.LMSTUDIO_BASE_PATH || "",
-          EMBEDDING_BASE_PATH: env.EMBEDDING_BASE_PATH || "",
-          CHROMA_URL: env.CHROMA_URL || "",
-          VECTOR_DB: env.VECTOR_DB || "",
-          STORAGE_DIR: ALLM_STORAGE,
-          orchestrator_upserts_only: true
-        };
-        wsSend(ws, { id: uid("cfgpush"), type: "mcp.event", scope: "config.read.result", body });
+        sendConfigReadResult(ws, null, false);
         log("info", "Pushed initial config.read.result");
       } catch (e) {
         log("warn", "Failed to push config.read.result", e?.message || e);
@@ -167,18 +184,9 @@ function connect(params) {
 
     if (scope === "config.read") {
       try {
-        const env = readEnvFile(ALLM_ENV_PATH);
-        const body = {
-          LMSTUDIO_BASE_PATH: env.LMSTUDIO_BASE_PATH || "",
-          EMBEDDING_BASE_PATH: env.EMBEDDING_BASE_PATH || "",
-          CHROMA_URL: env.CHROMA_URL || "",
-          VECTOR_DB: env.VECTOR_DB || "",
-          STORAGE_DIR: ALLM_STORAGE,
-          orchestrator_upserts_only: true
-        };
-        wsSend(ws, { id: msg.id, type: "mcp.response", ok: true, body });
+        sendConfigReadResult(ws, msg.id, false);
       } catch (err) {
-        wsSend(ws, { id: msg.id, type: "mcp.response", ok: false, error: { code: "READ_FAIL", message: String(err?.message || err) } });
+        wsSend(ws, { id: msg.id, type: "mcp.response", scope: "config.read.result", ok: false, error: { code: "READ_FAIL", message: String(err?.message || err) } });
       }
       return;
     }
@@ -191,9 +199,9 @@ function connect(params) {
           if (Object.prototype.hasOwnProperty.call(updates, k) && updates[k] != null) env[k] = String(updates[k]);
         }
         writeEnvAtomically(ALLM_ENV_PATH, env);
-        wsSend(ws, { id: msg.id, type: "mcp.response", ok: true, body: env });
+        sendConfigReadResult(ws, msg.id, false);
       } catch (err) {
-        wsSend(ws, { id: msg.id, type: "mcp.response", ok: false, error: { code: "WRITE_FAIL", message: String(err?.message || err) } });
+        wsSend(ws, { id: msg.id, type: "mcp.response", scope: "config.read.result", ok: false, error: { code: "WRITE_FAIL", message: String(err?.message || err) } });
       }
       return;
     }
