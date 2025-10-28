@@ -1,5 +1,15 @@
 # Cathedral Orchestrator – Changelog
 
+## [0.2.8]
+- Restore an explicit `Timeout(None)` on the LM AsyncClient to guarantee streaming relays never inherit a five-second default timeout while retaining connection pooling limits.
+- Keep LM catalog aggregation and probe requests bounded with the 4-field timeouts introduced in 0.2.7.
+- Bump Supervisor manifests to 0.2.8 so Home Assistant surfaces the follow-up patch.
+
+## [0.2.7]
+- Remove the global HTTPX timeout from the LM AsyncClient to keep streaming relays stable while retaining connection limits.
+- Apply per-request four-field HTTPX timeouts for LM host catalog fetches and probes so connect/read/write/pool phases are bounded without breaking SSE.
+- Bump Supervisor manifests to 0.2.7 for Home Assistant update detection.
+
 ## [0.2.6]
 - Make the s6 startup script non-blocking by probing LM hosts opportunistically so Uvicorn always boots while FastAPI retries in the background.
 - Run LM discovery and readiness refresh in a background bootstrap loop with shorter HTTP client timeouts to avoid long hangs during option reloads.
