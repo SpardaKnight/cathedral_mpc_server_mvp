@@ -1,5 +1,10 @@
 # Cathedral Orchestrator – Changelog
 
+## [0.2.6]
+- Make the s6 startup script non-blocking by probing LM hosts opportunistically so Uvicorn always boots while FastAPI retries in the background.
+- Run LM discovery and readiness refresh in a background bootstrap loop with shorter HTTP client timeouts to avoid long hangs during option reloads.
+- Apply option updates immediately in the API so hostpool and readiness state stay in sync without restarts.
+
 ## [0.2.4]
 - Return a faithful pass-through of LM Studio `/v1/models` data and preserve all upstream fields so clients can auto-detect token/window limits.
 - Normalize `lm_hosts` by stripping trailing `/v1` and extra slashes to prevent `/v1/v1/...` path errors and intermittent connectivity failures.
