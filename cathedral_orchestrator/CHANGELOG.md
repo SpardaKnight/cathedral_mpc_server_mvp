@@ -1,5 +1,13 @@
 # Cathedral Orchestrator – Changelog
 
+## [0.2.1]
+- Enrich `/v1/models` with LM Studio-provided context and embedding metadata so UIs auto-detect maximum tokens instead of
+  assuming 4k defaults.
+- Implement a real `/api/v0/models` union with LM Studio passthrough for single-host deployments and include per-model context
+  hints harvested during catalog refreshes.
+- Introduce a runtime requirements manifest (including PyYAML) and install it in the Docker image alongside the pinned relay
+  dependencies.
+
 ## [0.2.0]
 - Add PyYAML to the add-on image and guard `import yaml` to restore FastAPI boot.
 - Keep Chroma v2-first with a strict v1 fallback and redirect-friendly lookups; tolerate 404/405/409/410/422 on create/read and retry the alternate path.

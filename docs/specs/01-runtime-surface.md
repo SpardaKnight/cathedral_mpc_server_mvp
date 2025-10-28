@@ -4,7 +4,8 @@
 
 | Path | Method | Description | Request Body | Response | Notes |
 | --- | --- | --- | --- | --- | --- |
-| `/v1/models` | GET | Lists models from all configured LM hosts. | None | `{ "object": "list", "data": [...] }` aggregated from upstream hosts. | Returns 503 if HTTP client pool not ready. Upstream errors are logged with `lm_models_fail`. |
+| `/v1/models` | GET | Lists models from all configured LM hosts with LM Studio context metadata. | None | `{ "object": "list", "data": [...] }` aggregated from upstream hosts. | Returns 503 if HTTP client pool not ready. Each entry includes `context_length`, `max_input_tokens`, and optional `embedding_length` when LM Studio publishes them. |
+| `/api/v0/models` | GET | LM Studio-compatible REST catalog union. | None | `{ "loaded": [...], "downloaded": [] }` with per-model context hints. | Passes through to the single configured host or synthesizes a union across multiple hosts with metadata harvested during catalog refreshes. |
 | `/v1/chat/completions` | POST | Relays OpenAI Chat Completions to LM Studio. | OpenAI-compatible JSON (with optional `stream`). | Streaming SSE response from the first configured LM host (same base catalogued by `/api/v0/models`). | Forwards raw `text/event-stream` packets exactly as received from LM Studio. |
 | `/v1/embeddings` | POST | Proxies embeddings requests. | `{ "input": ..., "model": ... }` | JSON embedding payload from selected host. | Chooses host via `_route_for_model`; falls back to first host configured. |
 | `/api/options` | GET | Returns current runtime options. | None | JSON options map matching Supervisor schema. | Used for diagnostics. |
