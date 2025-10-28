@@ -144,7 +144,7 @@ class MPCServer:
         self, scope: str, workspace_id: Optional[str]
     ) -> Dict[str, Any]:
         """Return Cathedral agent metadata for MCP agent discovery."""
-
+        # Provide a stable 'params' shape — some UIs expect the key to exist.
         agent_record = {
             "id": "cathedral",
             "name": "Cathedral",
@@ -153,9 +153,13 @@ class MPCServer:
                 "handled": list(HANDLED_SCOPES),
                 "delegated": list(DELEGATED_SCOPES),
             },
+            "params": {
+                "chat": {"model": "auto", "temperature": 0.7, "top_p": 0.9},
+                "embedding": {"model": "auto"},
+            },
             "metadata": {
                 "workspace_id": workspace_id or "default",
-                "version": "0.1.5",
+                "version": "0.1.6",
             },
         }
 
@@ -176,7 +180,7 @@ class MPCServer:
         return payload
 
     async def _handle_resources(self) -> Dict[str, Any]:
-        """Expose the model catalog under catalog/hosts for client compatibility."""
+        """Expose the model catalog under both catalog and hosts for client compatibility."""
 
         catalog = await self.catalog_snapshot()
         normalized = {"catalog": dict(catalog), "hosts": dict(catalog)}
@@ -436,7 +440,7 @@ async def mcp_socket(ws: WebSocket):
 
             if scope == "handshake":
                 res = {
-                    "server": "cathedral-mpc/1.1",
+                    "server": "cathedral-mpc/1.2",
                     "scopes": {
                         "handled": list(HANDLED_SCOPES),
                         "delegated": list(DELEGATED_SCOPES),
@@ -586,8 +590,8 @@ async def mcp_socket(ws: WebSocket):
             elif scope and scope.startswith("agents."):
                 workspace_id = (
                     headers.get("workspace_id")
+                    or body.get("workspace_id")
                     or payload.get("workspace_id")
-                    or payload.get("headers", {}).get("workspace_id")
                 )
                 frame = {
                     "id": rid,

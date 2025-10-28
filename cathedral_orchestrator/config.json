@@ -1,6 +1,6 @@
 {
   "name": "Cathedral Orchestrator",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "slug": "cathedral_orchestrator",
   "description": "OpenAI-compatible relay and MPC server for Cathedral. Streams chat, routes sessions, and writes vectors to a single LAN Chroma.",
   "arch": [
