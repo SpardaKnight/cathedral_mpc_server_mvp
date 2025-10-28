@@ -1,5 +1,9 @@
 # Cathedral Orchestrator – Changelog
 
+## [0.2.3]
+- Normalize `/v1/models` responses so context window and max token metadata flow from LM Studio (with Llama 3 70B defaults when missing) to keep AnythingLLM auto-detect accurate.
+- Bump manifests to 0.2.3 for Supervisor visibility.
+
 ## [0.2.2]
 - Preserve LM Studio model metadata by proxying `/v1/models` unmodified and add `HEAD /v1/models` for provider probing.
 - Normalize LM host entries by auto-stripping `/v1` and trailing slashes so entered URLs always resolve.
