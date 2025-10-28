@@ -1,7 +1,7 @@
 configuration:
   lm_hosts:
     name: LM hosts
-    description: List of OpenAI-compatible base URLs. Do not include /v1.
+    description: List of OpenAI-compatible base URLs. Do not include /v1 (the add-on strips it automatically if present).
   chroma_mode:
     name: Chroma mode
     description: HTTP only
