@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -300,6 +301,47 @@ async def prune_idle(ttl_minutes: int = DEFAULT_TTL_MINUTES) -> int:
             error=str(exc),
         )
         return 0
+
+
+def prune_expired_sync(ttl_minutes: int = DEFAULT_TTL_MINUTES) -> int:
+    """Synchronous prune for use inside the background thread.
+    Avoids nested event loops and aiosqlite’s internal thread, eliminating
+    'threads can only be started once' errors in some environments."""
+    cutoff = time.time() - (ttl_minutes * 60)
+    conn: Optional[sqlite3.Connection] = None
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except Exception:
+            pass
+        cur = conn.cursor()
+        cur.execute("DELETE FROM sessions WHERE updated_ts < ?", (cutoff,))
+        conn.commit()
+        count = cur.rowcount or 0
+        jlog(
+            logger,
+            event="session_pruned_idle_sync",
+            ttl_minutes=ttl_minutes,
+            pruned=int(count),
+        )
+        return int(count)
+    except Exception as exc:  # defensive
+        jlog(
+            logger,
+            level="ERROR",
+            event="session_prune_failed_sync",
+            ttl_minutes=ttl_minutes,
+            error=str(exc),
+        )
+        return 0
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
 
 
 def prune_expired(ttl_minutes: int = DEFAULT_TTL_MINUTES) -> int:

@@ -229,7 +229,7 @@ def _prune_loop() -> None:
     try:
         while not _prune_stop.is_set():
             try:
-                pruned = sessions.prune_expired()
+                pruned = sessions.prune_expired_sync()
                 jlog(
                     logger,
                     event="session_prune_cycle",
