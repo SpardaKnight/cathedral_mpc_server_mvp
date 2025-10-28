@@ -1,5 +1,11 @@
 # Cathedral Orchestrator – Changelog
 
+## [0.1.5]
+- Restore MPC `agents.*` surface and advertise capabilities in the handshake.
+- Implement `agents.list` (with compatible `agents.get`/`agents.describe`) returning the Cathedral orchestrator agent.
+- Normalize `resources.list` to expose the model catalog under both `catalog` and `hosts` keys for client compatibility.
+- Keep `tools.*` delegated via ToolBridge and retain the SSE relay stability introduced in 0.1.4.
+
 ## [0.1.4]
 - Fix streaming relay to treat httpx.StreamClosed as a clean EOF and always emit `data: [DONE]`.
 - Remove idle read timeouts in the SSE path and keep a pure pass-through using `aiter_raw`.

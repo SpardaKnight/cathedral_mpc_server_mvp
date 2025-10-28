@@ -4,6 +4,7 @@ import json
 import os
 import time
 import uuid
+from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import httpx
@@ -17,6 +18,19 @@ from .vector.chroma_client import ChromaClient
 router = APIRouter()
 
 logger = setup_logging(os.environ.get("LOG_LEVEL", "INFO"))
+
+HANDLED_SCOPES = (
+    "session.*",
+    "memory.*",
+    "prompts.*",
+    "config.*",
+    "sampling.*",
+    "resources.*",
+    "agents.*",
+    "cathedral.*",
+)
+
+DELEGATED_SCOPES = ("tools.*",)
 
 
 class MPCServer:
@@ -126,6 +140,49 @@ class MPCServer:
             )
         return collection_id
 
+    async def _handle_agents(
+        self, scope: str, workspace_id: Optional[str]
+    ) -> Dict[str, Any]:
+        """Return Cathedral agent metadata for MCP agent discovery."""
+
+        agent_record = {
+            "id": "cathedral",
+            "name": "Cathedral",
+            "kind": "orchestrator",
+            "capabilities": {
+                "handled": list(HANDLED_SCOPES),
+                "delegated": list(DELEGATED_SCOPES),
+            },
+            "metadata": {
+                "workspace_id": workspace_id or "default",
+                "version": "0.1.5",
+            },
+        }
+
+        if scope == "agents.list":
+            payload: Dict[str, Any] = {"agents": [agent_record]}
+        elif scope in {"agents.get", "agents.describe"}:
+            payload = {"agent": agent_record}
+        else:
+            payload = {}
+
+        jlog(
+            logger,
+            event="mpc_agents_response",
+            scope=scope,
+            workspace_id=workspace_id or "default",
+            keys=list(payload.keys()),
+        )
+        return payload
+
+    async def _handle_resources(self) -> Dict[str, Any]:
+        """Expose the model catalog under catalog/hosts for client compatibility."""
+
+        catalog = await self.catalog_snapshot()
+        normalized = {"catalog": dict(catalog), "hosts": dict(catalog)}
+        jlog(logger, event="mpc_resources_list", hosts=len(catalog))
+        return normalized
+
     async def handle(self, ws: WebSocket):
         await ws.accept()
         try:
@@ -141,13 +198,36 @@ class MPCServer:
                         res = await self._handle_session(msg)
                     elif scope and scope.startswith("memory."):
                         res = await self._handle_memory(msg)
+                    elif scope == "resources.list":
+                        res = {"ok": True, "body": await self._handle_resources()}
+                    elif scope == "resources.health":
+                        from . import main as orchestrator_main
+
+                        host_health = dict(orchestrator_main.HOST_HEALTH)
+                        body = {
+                            "ready": self.is_ready(),
+                            "host_health": host_health,
+                            "ts": datetime.utcnow().isoformat() + "Z",
+                        }
+                        jlog(
+                            logger,
+                            event="mpc_resources_health",
+                            ready=body["ready"],
+                            hosts=len(host_health),
+                        )
+                        res = {"ok": True, "body": body}
+                    elif scope and scope.startswith("agents."):
+                        workspace_id = msg.get("workspace_id")
+                        res = {
+                            "ok": True,
+                            "body": await self._handle_agents(scope, workspace_id),
+                        }
                     elif scope and scope.startswith(
                         (
                             "config.",
                             "prompts.",
                             "sampling.",
                             "resources.",
-                            "agents.",
                             "cathedral.",
                         )
                     ):
@@ -356,19 +436,10 @@ async def mcp_socket(ws: WebSocket):
 
             if scope == "handshake":
                 res = {
-                    "server": "cathedral-mpc/1.0",
+                    "server": "cathedral-mpc/1.1",
                     "scopes": {
-                        "handled": [
-                            "session.*",
-                            "memory.*",
-                            "prompts.*",
-                            "config.*",
-                            "sampling.*",
-                            "resources.*",
-                            "agents.*",
-                            "cathedral.*",
-                        ],
-                        "delegated": ["tools.*"],
+                        "handled": list(HANDLED_SCOPES),
+                        "delegated": list(DELEGATED_SCOPES),
                     },
                     "heartbeat_ms": 30000,
                 }
@@ -485,20 +556,12 @@ async def mcp_socket(ws: WebSocket):
                     "body": res,
                 }
             elif scope == "resources.list":
-                from . import main as orchestrator_main
-
-                catalog = dict(orchestrator_main.MODEL_CATALOG)
                 frame = {
                     "id": rid,
                     "type": "mcp.response",
                     "ok": True,
-                    "body": {"catalog": catalog},
+                    "body": await server._handle_resources(),
                 }
-                jlog(
-                    logger,
-                    event="mpc_resources_list",
-                    hosts=len(catalog),
-                )
             elif scope == "resources.health":
                 from . import main as orchestrator_main
 
@@ -508,7 +571,11 @@ async def mcp_socket(ws: WebSocket):
                     "id": rid,
                     "type": "mcp.response",
                     "ok": True,
-                    "body": {"ready": ready, "host_health": health},
+                    "body": {
+                        "ready": ready,
+                        "host_health": health,
+                        "ts": datetime.utcnow().isoformat() + "Z",
+                    },
                 }
                 jlog(
                     logger,
@@ -516,8 +583,20 @@ async def mcp_socket(ws: WebSocket):
                     ready=ready,
                     hosts=len(health),
                 )
+            elif scope and scope.startswith("agents."):
+                workspace_id = (
+                    headers.get("workspace_id")
+                    or payload.get("workspace_id")
+                    or payload.get("headers", {}).get("workspace_id")
+                )
+                frame = {
+                    "id": rid,
+                    "type": "mcp.response",
+                    "ok": True,
+                    "body": await server._handle_agents(scope, workspace_id),
+                }
             elif scope and scope.startswith(
-                ("prompts.", "sampling.", "resources.", "agents.", "cathedral.")
+                ("prompts.", "sampling.", "resources.", "cathedral.")
             ):
                 call = payload if legacy else {"payload": payload}
                 res = await server._handle_generic(call)
