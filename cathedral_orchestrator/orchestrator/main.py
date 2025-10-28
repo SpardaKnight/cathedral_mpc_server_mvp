@@ -181,6 +181,8 @@ class OptionsModel(BaseModel):
     lock_EMBEDDING_BASE_PATH: bool = False
     lock_CHROMA_URL: bool = False
     lock_VECTOR_DB: bool = False
+    auto_config_active: bool = False
+    upserts_active: bool = False
 
 
 DEFAULT_OPTIONS = OptionsModel().model_dump()
@@ -304,6 +306,8 @@ async def reload_clients_from_options(
         options_override if options_override is not None else load_options_from_disk()
     )
     CURRENT_OPTIONS = options
+    CURRENT_OPTIONS.setdefault("auto_config_active", AUTO_CONFIG_ACTIVE)
+    CURRENT_OPTIONS.setdefault("upserts_active", UPSERTS_ACTIVE)
 
     LM_HOSTS = _normalize_lm_hosts(options.get("lm_hosts", LM_HOSTS))
     requested_mode = str(options.get("chroma_mode", CHROMA_MODE)).lower()
@@ -469,7 +473,7 @@ async def update_bootstrap_state(
     catalog_override: Optional[Dict[str, List[str]]] = None,
     chroma_ready_override: Optional[bool] = None,
 ) -> None:
-    global AUTO_CONFIG_ACTIVE, UPSERTS_ACTIVE
+    global AUTO_CONFIG_ACTIVE, UPSERTS_ACTIVE, CURRENT_OPTIONS
 
     client = APP_CLIENTS.get("lm")
     catalog: Dict[str, List[str]] = {} if catalog_override is None else catalog_override
@@ -497,6 +501,8 @@ async def update_bootstrap_state(
 
     AUTO_CONFIG_ACTIVE = ready and AUTO_CONFIG_REQUESTED
     UPSERTS_ACTIVE = ready and UPSERTS_REQUESTED
+    CURRENT_OPTIONS["auto_config_active"] = AUTO_CONFIG_ACTIVE
+    CURRENT_OPTIONS["upserts_active"] = UPSERTS_ACTIVE
     jlog(
         logger,
         event="bootstrap_state",
@@ -671,8 +677,17 @@ async def api_set_options(request: Request) -> JSONResponse:
         "chroma_mode": bool(CURRENT_OPTIONS.get("lock_VECTOR_DB", False)),
     }
 
+    status_fields = {"auto_config_active", "upserts_active"}
     filtered_body: Dict[str, Any] = {}
     for key, value in body.items():
+        if key in status_fields:
+            jlog(
+                logger,
+                level="INFO",
+                event="api_options_status_field_ignored",
+                field=key,
+            )
+            continue
         if key in lock_map and lock_map[key]:
             jlog(
                 logger,
@@ -757,12 +772,26 @@ async def _route_for_model(model: str) -> str:
 
 @app.post("/v1/chat/completions")
 async def relay_chat_completions(request: Request):
+    # Require at least one configured LM host
     if not LM_HOSTS:
         raise HTTPException(status_code=503, detail="no lm hosts configured")
 
-    lm_base = list(LM_HOSTS.values())[0]
-    url = f"{lm_base.rstrip('/')}/v1/chat/completions"
+    # Read body once for upstream reuse
+    body_bytes = await request.body()
+    model = None
+    if body_bytes:
+        try:
+            payload = json.loads(body_bytes)
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            model = payload.get("model")
 
+    # Route to the correct base similarly to model listing
+    target_base = await _route_for_model(model) if model else list(LM_HOSTS.values())[0]
+    url = f"{target_base.rstrip('/')}/v1/chat/completions"
+
+    # Forward headers for SSE
     fwd_headers = {
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
@@ -772,38 +801,24 @@ async def relay_chat_completions(request: Request):
         fwd_headers["Authorization"] = auth
 
     try:
+        # No read timeout for streaming; we detect client disconnects ourselves
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream(
                 "POST",
                 url,
                 headers=fwd_headers,
-                content=await request.body(),
+                content=body_bytes,
             ) as upstream:
 
                 async def forward():
-                    agen = upstream.aiter_raw()
-                    idle_timeout = 300
                     saw_done = False
+                    agen = upstream.aiter_raw()
                     while True:
                         if await request.is_disconnected():
-                            jlog(
-                                logger,
-                                event="chat_relay_client_disconnected",
-                                url=url,
-                            )
+                            jlog(logger, event="chat_relay_client_disconnected", url=url)
                             break
                         try:
-                            chunk = await asyncio.wait_for(
-                                agen.__anext__(), timeout=idle_timeout
-                            )
-                        except asyncio.TimeoutError:
-                            jlog(
-                                logger,
-                                level="WARN",
-                                event="chat_relay_upstream_idle_timeout",
-                                url=url,
-                            )
-                            break
+                            chunk = await agen.__anext__()
                         except StopAsyncIteration:
                             break
                         else:
@@ -811,11 +826,10 @@ async def relay_chat_completions(request: Request):
                                 saw_done = True
                             yield chunk
                     if not saw_done:
+                        # Guarantee the sentinel to keep A-LLM clients happy
                         yield b"data: [DONE]\n\n"
 
-                return StreamingResponse(
-                    forward(), media_type="text/event-stream"
-                )
+                return StreamingResponse(forward(), media_type="text/event-stream")
     except httpx.HTTPError as exc:
         jlog(
             logger,
