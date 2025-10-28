@@ -129,6 +129,59 @@ async def list_models_from_host(client: httpx.AsyncClient, base: str) -> Tuple[s
     return base_clean, items
 
 
+def _coerce_int(value: Any) -> Optional[int]:
+    try:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            candidate = int(value)
+            return candidate if candidate > 0 else None
+        if isinstance(value, str) and value.strip():
+            candidate = int(float(value))
+            return candidate if candidate > 0 else None
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _normalize_model_token_limits(model: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(model)
+
+    context_candidates = [
+        normalized.get("context_window"),
+        normalized.get("context_length"),
+        normalized.get("contextLength"),
+        normalized.get("max_context_length"),
+    ]
+    context_window: Optional[int] = None
+    for candidate in context_candidates:
+        context_window = _coerce_int(candidate)
+        if context_window is not None:
+            break
+    if context_window is None:
+        context_window = 8192
+    normalized["context_window"] = context_window
+
+    max_token_candidates = [
+        normalized.get("max_tokens"),
+        normalized.get("max_output_tokens"),
+        normalized.get("max_token_count"),
+        normalized.get("maxTokenCount"),
+        normalized.get("max_new_tokens"),
+        context_window,
+    ]
+    max_tokens: Optional[int] = None
+    for candidate in max_token_candidates:
+        max_tokens = _coerce_int(candidate)
+        if max_tokens is not None:
+            break
+    if max_tokens is None:
+        max_tokens = context_window or 8192
+    normalized["max_tokens"] = max_tokens
+
+    return normalized
+
+
 def build_model_index(
     host_models: List[Tuple[str, List[Dict[str, Any]]]],
 ) -> Dict[str, str]:
@@ -891,12 +944,21 @@ async def models_v1(_request: Request) -> JSONResponse:
             continue
         _, items = cast(Tuple[str, List[Dict[str, Any]]], res)
         for obj in items:
-            mid = str(obj.get("id") or obj.get("name") or "") if isinstance(obj, dict) else str(obj)
+            mid = (
+                str(obj.get("id") or obj.get("name") or "")
+                if isinstance(obj, dict)
+                else str(obj)
+            )
             if not mid:
                 continue
             if mid in seen:
                 continue
-            aggregated.append(obj)
+            normalized = (
+                _normalize_model_token_limits(obj)
+                if isinstance(obj, dict)
+                else obj
+            )
+            aggregated.append(normalized)
             seen.add(mid)
     jlog(
         logger,
