@@ -92,7 +92,7 @@ async def list_models_from_host(client: httpx.AsyncClient, base: str) -> Tuple[s
         url,
         headers={"Accept": "application/json"},
         follow_redirects=True,
-        timeout=httpx.Timeout(connect=10, read=20),
+        timeout=httpx.Timeout(connect=5.0, read=5.0, write=5.0, pool=5.0),
     )
     resp.raise_for_status()
     payload = resp.json()
@@ -611,7 +611,7 @@ async def get_readiness() -> Tuple[bool, bool, bool]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     APP_CLIENTS["lm"] = httpx.AsyncClient(
-        timeout=httpx.Timeout(connect=5, read=5, write=10, pool=None),
+        timeout=httpx.Timeout(None),
         limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
     )
     APP_CLIENTS["chroma"] = httpx.AsyncClient(
@@ -836,7 +836,11 @@ async def models_v0_aggregate(_request: Request):
     if len(hosts) == 1:
         url = hosts[0].rstrip("/") + "/api/v0/models"
         try:
-            resp = await client.get(url, follow_redirects=True, timeout=20)
+            resp = await client.get(
+                url,
+                follow_redirects=True,
+                timeout=httpx.Timeout(connect=5.0, read=20.0, write=5.0, pool=5.0),
+            )
             resp.raise_for_status()
             payload = resp.json()
             jlog(
@@ -909,7 +913,10 @@ async def models_v1_head() -> Response:
     for base in LM_HOSTS.values():
         try:
             host = base.rstrip("/")
-            resp = await client.get(f"{host}/v1/models", timeout=5)
+            resp = await client.get(
+                f"{host}/v1/models",
+                timeout=httpx.Timeout(connect=2.0, read=2.0, write=2.0, pool=2.0),
+            )
             if resp.status_code == 200:
                 jlog(logger, event="models_v1_head_ok", host=host)
                 return Response(status_code=200)
