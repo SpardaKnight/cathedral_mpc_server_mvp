@@ -21,7 +21,7 @@ COPY orchestrator/ /opt/app/orchestrator/
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 RUN . /opt/venv/bin/activate && \
-    pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir --upgrade pip wheel && \
     pip install --no-cache-dir -r /opt/app/requirements.txt && \
     pip install --no-cache-dir \
       fastapi==0.115.0 \
@@ -33,7 +33,7 @@ RUN . /opt/venv/bin/activate && \
       uvloop==0.19.0 \
       httptools==0.6.1 \
       aiosqlite==0.20.0 \
-      PyYAML==6.0.1
+      PyYAML==6.0.2
 # No chromadb here. Chroma is external over HTTP.
 
 COPY rootfs/ /
