@@ -1,23 +1,38 @@
 {
-  "schema": "skill-1.0.0",
   "active": true,
+  "schema": "skill-1.0.0",
   "hubId": "cathedral-mpc-bridge",
   "name": "Cathedral MPC Bridge",
   "version": "1.1.0",
-  "description": "Bridges AnythingLLM Desktop to Cathedral Orchestrator MPC for deterministic .env read and write. No local server is created.",
-  "author": "@Warmaster",
+  "description": "Bridges AnythingLLM Desktop to the Cathedral Orchestrator MPC for deterministic .env sync. Starts a persistent MPC WebSocket and exposes a small command surface.",
+  "author": "Warmaster (SpardaKnight)",
+  "author_url": "https://github.com/SpardaKnight",
   "license": "MIT",
+  "setup_args": {
+    "AUTH": {
+      "type": "string",
+      "required": false,
+      "input": { "type": "password", "placeholder": "Bearer <HA_LONG_LIVED_TOKEN>" },
+      "hint": "Home Assistant long-lived token with Bearer prefix. Stored only in this plugin .env"
+    },
+    "ORCH_URL": {
+      "type": "string",
+      "required": false,
+      "input": { "type": "text", "default": "ws://homeassistant.local:5005/mcp" },
+      "hint": "MPC WebSocket URL of the Cathedral Orchestrator"
+    }
+  },
   "examples": [
-    { "prompt": "Check the bridge status", "call": "{\"command\": \"status\"}" },
-    { "prompt": "Restart the bridge", "call": "{\"command\": \"restart\"}" }
+    { "prompt": "@agent cathedral connect", "call": "{\"action\":\"connect\"}" },
+    { "prompt": "@agent cathedral status", "call": "{\"action\":\"status\"}" },
+    { "prompt": "@agent cathedral configure to ws://ha.local:5005/mcp with token <redacted>", "call": "{\"action\":\"configure\",\"orch_url\":\"ws://ha.local:5005/mcp\",\"auth\":\"Bearer ...\"}" }
   ],
   "entrypoint": {
     "file": "handler.js",
     "params": {
-      "command": {
-        "description": "Action to perform - status or restart",
-        "type": "string"
-      }
+      "action":   { "description": "configure | connect | restart | status", "type": "string" },
+      "orch_url": { "description": "Override MPC ws url",                   "type": "string" },
+      "auth":     { "description": "Override Bearer token",                 "type": "string" }
     }
   },
   "imported": true

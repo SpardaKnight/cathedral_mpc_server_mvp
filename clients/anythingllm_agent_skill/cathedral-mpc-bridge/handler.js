@@ -1,8 +1,12 @@
-// Cathedral MPC Bridge - AnythingLLM Agent Skill (Desktop)
-// Connects to HA MPC ws://.../mcp and provides deterministic .env read/write.
-// Auto-starts on load. Exposes a runtime.handler so the Agent can call it.
-
 "use strict";
+
+/**
+ * Cathedral MPC Bridge - AnythingLLM Agent Skill (Desktop)
+ * - Opens a persistent WebSocket to the Orchestrator MPC server.
+ * - Handles config.read and config.write locally for .env synchronization.
+ * - Exposes a minimal agent command surface: configure | connect | restart | status.
+ * - Always return a string per AnythingLLM rules.
+ */
 
 const fs = require("node:fs");
 const path = require("node:path");
@@ -11,16 +15,11 @@ const http = require("node:http");
 const https = require("node:https");
 const crypto = require("node:crypto");
 
-const NativeWS = typeof WebSocket !== "undefined" ? WebSocket : null;
-let WS = NativeWS;
-if (!WS) { try { WS = require("ws"); } catch { WS = null; } }
+// Directories
+const PLUGIN_DIR = __dirname;
+const LOCAL_ENV = path.join(PLUGIN_DIR, ".env");
 
-function log(level, msg) {
-  const ts = new Date().toISOString();
-  console.log(`[Cathedral-MPC-Bridge][${level}] ${ts} ${msg}`);
-}
-function uid(prefix) { return `${prefix}-${crypto.randomBytes(8).toString("hex")}`; }
-
+// AnythingLLM Desktop storage .env (the one we read/write for config.*)
 function storageDir() {
   if (process.platform === "win32") {
     const base = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
@@ -30,11 +29,19 @@ function storageDir() {
   }
   return path.join(os.homedir(), ".config", "anythingllm-desktop", "storage");
 }
-const ENV_PATH = path.join(storageDir(), ".env");
+const ALLM_STORAGE = storageDir();
+const ALLM_ENV_PATH = path.join(ALLM_STORAGE, ".env");
 
-function readEnv() {
+// Logging
+function log(level, msg, extra) {
+  const base = `[Cathedral-MPC-Bridge][${level}] ${msg}`;
+  try { if (extra) console.log(base, extra); else console.log(base); } catch {}
+}
+
+// Simple .env helpers
+function readEnvFile(file) {
   try {
-    const txt = fs.readFileSync(ENV_PATH, "utf8");
+    const txt = fs.readFileSync(file, "utf8");
     const out = {};
     for (const line of txt.split(/\r?\n/)) {
       const t = line.trim();
@@ -49,119 +56,182 @@ function readEnv() {
     return out;
   } catch { return {}; }
 }
-function needsQuotes(v) { return /\s|["'#]/.test(v); }
-function writeEnvAtomically(map) {
-  const lines = Object.keys(map).map(k => {
-    const v = String(map[k] ?? "");
-    return `${k}=${needsQuotes(v) ? JSON.stringify(v) : v}`;
-  });
-  const tmp = `${ENV_PATH}.${Date.now()}.tmp`;
-  fs.writeFileSync(tmp, lines.join("\n"), "utf8");
-  fs.renameSync(tmp, ENV_PATH);
+function quoteIfNeeded(v) { return /\s|["'#]/.test(v) ? `"${String(v).replace(/"/g,'\\"')}"` : String(v); }
+function writeEnvAtomically(file, map) {
+  const tmp = `${file}.${crypto.randomBytes(6).toString("hex")}.tmp`;
+  const lines = Object.entries(map).map(([k, v]) => `${k}=${quoteIfNeeded(v)}`).join(os.EOL);
+  fs.writeFileSync(tmp, lines, "utf8");
+  fs.renameSync(tmp, file);
 }
-function normalize(obj) {
-  const out = {};
-  const keys = ["LMSTUDIO_BASE_PATH","EMBEDDING_BASE_PATH","CHROMA_URL","VECTOR_DB","STORAGE_DIR"];
-  for (const k of keys) if (obj[k]) out[k] = obj[k].trim();
-  out.orchestrator_upserts_only = true;
-  return out;
-}
-function httpJson(url, timeoutMs = 3000) {
+
+// Minimal HTTP json fetch for future extensions
+async function httpJson(url, timeoutMs) {
   return new Promise((resolve) => {
-    const mod = url.startsWith("https") ? https : http;
-    const req = mod.get(url, { timeout: timeoutMs }, (res) => {
-      let buf = ""; res.setEncoding("utf8");
-      res.on("data", (c) => buf += c);
-      res.on("end", () => { try { resolve(JSON.parse(buf)); } catch { resolve(null); } });
-    });
-    req.on("error", () => resolve(null));
-    req.on("timeout", () => { try { req.destroy(); } catch {} resolve(null); });
+    try {
+      const lib = url.startsWith("https") ? https : http;
+      const req = lib.get(url, { timeout: timeoutMs || 3000 }, (res) => {
+        if ((res.statusCode || 500) >= 400) { res.resume(); return resolve(null); }
+        const chunks = [];
+        res.on("data", d => chunks.push(Buffer.isBuffer(d) ? d : Buffer.from(d)));
+        res.on("end", () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))); } catch { resolve(null); } });
+      });
+      req.on("timeout", () => { try { req.destroy(new Error("timeout")); } catch {} });
+      req.on("error", () => resolve(null));
+    } catch { resolve(null); }
   });
 }
 
-const ORCH_URL = process.env.CATHEDRAL_MPC_URL || "ws://homeassistant.local:5005/mcp";
-const AUTH = process.env.CATHEDRAL_MPC_TOKEN || "Bearer <SET_YOUR_HA_LONG_LIVED_TOKEN>";
-const CLIENT = "anythingllm/desktop";
-const VERSION = "v1.0";
+// WebSocket impl
+let WSImpl = null;
+try { WSImpl = (globalThis && globalThis.WebSocket) ? globalThis.WebSocket : require("ws"); } catch {}
 
-function wsSend(ws, payload) { try { ws.send(JSON.stringify(payload)); } catch {} }
+let _ws = null;
+let _hb = null;
+let _reconnectTimer = null;
+let _orchUrl = null;
+let _auth = null;
 
-let ws = null;
-let inFlight = null;
-let backoff = 1000;
+function wsSend(ws, obj) { try { ws.send(JSON.stringify(obj)); } catch {} }
+function uid(prefix) { return `${prefix}_${crypto.randomBytes(8).toString("hex")}`; }
 
-function connect() {
-  if (!WS) { log("error", "No WebSocket available"); return; }
-  try {
-    ws = new WS(ORCH_URL, { headers: { Authorization: AUTH, "User-Agent": "Cathedral-MPC-Bridge" } });
-  } catch (e) { log("error", `Failed to construct WebSocket: ${e?.message || e}`); return; }
+function closeBridge() {
+  try { if (_hb) clearInterval(_hb); } catch {}
+  _hb = null;
+  try { if (_reconnectTimer) clearTimeout(_reconnectTimer); } catch {}
+  _reconnectTimer = null;
+  try { if (_ws) _ws.close(); } catch {}
+  _ws = null;
+}
+
+function scheduleReconnect() {
+  try { if (_reconnectTimer) clearTimeout(_reconnectTimer); } catch {}
+  _reconnectTimer = setTimeout(() => { try { connect(); } catch (e) { log("error", "reconnect failed", e?.message || e); } }, 5000);
+}
+
+function currentConfig(params) {
+  const local = readEnvFile(LOCAL_ENV);
+  const auth = (params?.auth || local.AUTH || process.env.CATHEDRAL_MPC_TOKEN || "").trim();
+  const orchUrl = (params?.orch_url || local.ORCH_URL || "ws://homeassistant.local:5005/mcp").trim();
+  return { auth, orchUrl };
+}
+
+function connect(params) {
+  if (!WSImpl) { log("error","No WebSocket implementation available"); return "No WebSocket"; }
+  const { auth, orchUrl } = currentConfig(params);
+  if (!auth || !auth.toLowerCase().startsWith("bearer ")) return "Missing AUTH 'Bearer <token>' in plugin .env or params";
+  _auth = auth;
+  _orchUrl = orchUrl;
+
+  closeBridge();
+
+  const ws = new WSImpl(_orchUrl, [], { headers: { authorization: _auth } });
+  _ws = ws;
 
   ws.onopen = async () => {
-    log("info", `Connected to ${ORCH_URL}`); backoff = 1000;
+    log("info", `Connected ${_orchUrl}`);
+    // Handshake
     wsSend(ws, {
-      id: uid("hello"), type: "mcp.request", scope: "handshake",
-      headers: { authorization: AUTH, workspace_id: "ws_anythingllm", client: CLIENT, client_version: VERSION },
-      body: { capabilities: ["config.read","config.write","session.*","memory.*"], orchestrator_upserts_only: true }
+      id: uid("hello"),
+      type: "mcp.request",
+      scope: "handshake",
+      headers: { authorization: _auth, workspace_id: "anythingllm_desktop", client: "anythingllm/agent-skill", client_version: "v1" },
+      body: { capabilities: ["config.read","config.write"] }
     });
-    setTimeout(async () => {
-      if (!ws || ws.readyState !== 1) return;
-      const body = normalize(readEnv());
+    // Push initial config.read.result shortly after connect
+    setTimeout(() => {
       try {
-        const base = body.LMSTUDIO_BASE_PATH;
-        if (base) {
-          const u = (base.endsWith("/v1") ? base : (base.replace(/\/+$/,"") + "/v1")) + "/models";
-          const data = await httpJson(u, 2500);
-          if (data && Array.isArray(data.data)) body.models_count = data.data.length;
-        }
-      } catch {}
-      wsSend(ws, { id: uid("config.push"), type: "mcp.event", scope: "config.read.result", body });
-    }, 2000);
-  };
-
-  ws.onmessage = (evt) => {
-    let msg = {}; try { msg = JSON.parse(evt.data); } catch { return; }
-    if (msg.type !== "mcp.request") return;
-    const scope = msg.scope || "";
-    if (scope === "config.read") {
-      const body = normalize(readEnv());
-      wsSend(ws, { id: msg.id || uid("config.read"), type: "mcp.response", ok: true, body });
-    } else if (scope === "config.write") {
-      try {
-        const updates = msg.body?.updates || {};
-        const current = readEnv();
-        for (const [k, v] of Object.entries(updates)) current[k] = String(v ?? "");
-        writeEnvAtomically(current);
-        const body = normalize(current);
-        wsSend(ws, { id: msg.id || uid("config.write"), type: "mcp.response", ok: true, body });
+        const env = readEnvFile(ALLM_ENV_PATH);
+        const body = {
+          LMSTUDIO_BASE_PATH: env.LMSTUDIO_BASE_PATH || "",
+          EMBEDDING_BASE_PATH: env.EMBEDDING_BASE_PATH || "",
+          CHROMA_URL: env.CHROMA_URL || "",
+          VECTOR_DB: env.VECTOR_DB || "",
+          STORAGE_DIR: ALLM_STORAGE,
+          orchestrator_upserts_only: true
+        };
+        wsSend(ws, { id: uid("cfgpush"), type: "mcp.event", scope: "config.read.result", body });
+        log("info", "Pushed initial config.read.result");
       } catch (e) {
-        wsSend(ws, { id: msg.id || uid("config.write"), type: "mcp.response", ok: false, error: { code: "WRITE_FAIL", message: e?.message || String(e) } });
+        log("warn", "Failed to push config.read.result", e?.message || e);
       }
-    }
+    }, 1500);
+
+    _hb = setInterval(() => { try { wsSend(ws, { id: uid("hb"), type: "mcp.event", scope: "heartbeat", ts: Date.now() }); } catch {} }, 30000);
   };
 
-  ws.onclose = () => { log("warn", "Socket closed"); ws = null; setTimeout(connect, backoff); backoff = Math.min(backoff * 2, 30000); };
-  ws.onerror = (err) => { log("error", `Socket error: ${err?.message || err}`); };
+  ws.onmessage = async (e) => {
+    let msg = {};
+    try { msg = JSON.parse(String(e?.data || "{}")); } catch {}
+    const scope = msg.scope || "";
+    if (msg.type !== "mcp.request") return;
+
+    if (scope === "config.read") {
+      try {
+        const env = readEnvFile(ALLM_ENV_PATH);
+        const body = {
+          LMSTUDIO_BASE_PATH: env.LMSTUDIO_BASE_PATH || "",
+          EMBEDDING_BASE_PATH: env.EMBEDDING_BASE_PATH || "",
+          CHROMA_URL: env.CHROMA_URL || "",
+          VECTOR_DB: env.VECTOR_DB || "",
+          STORAGE_DIR: ALLM_STORAGE,
+          orchestrator_upserts_only: true
+        };
+        wsSend(ws, { id: msg.id, type: "mcp.response", ok: true, body });
+      } catch (err) {
+        wsSend(ws, { id: msg.id, type: "mcp.response", ok: false, error: { code: "READ_FAIL", message: String(err?.message || err) } });
+      }
+      return;
+    }
+
+    if (scope === "config.write") {
+      try {
+        const updates = (msg.body && msg.body.updates) || {};
+        const env = readEnvFile(ALLM_ENV_PATH);
+        for (const k of ["LMSTUDIO_BASE_PATH","EMBEDDING_BASE_PATH","CHROMA_URL","VECTOR_DB"]) {
+          if (Object.prototype.hasOwnProperty.call(updates, k) && updates[k] != null) env[k] = String(updates[k]);
+        }
+        writeEnvAtomically(ALLM_ENV_PATH, env);
+        wsSend(ws, { id: msg.id, type: "mcp.response", ok: true, body: env });
+      } catch (err) {
+        wsSend(ws, { id: msg.id, type: "mcp.response", ok: false, error: { code: "WRITE_FAIL", message: String(err?.message || err) } });
+      }
+      return;
+    }
+
+    // Other scopes handled on the Orchestrator side; ignore here.
+  };
+
+  ws.onclose  = () => { log("warn", "MCP socket closed"); if (_hb) { clearInterval(_hb); _hb = null; } scheduleReconnect(); };
+  ws.onerror  = (err) => { log("error", `WebSocket error ${err?.message || err}`); };
+  return "connected";
 }
 
-function startBridge() { if (inFlight) return; inFlight = true; connect(); }
-try { startBridge(); } catch (e) { log("error", `Bridge init failed: ${e?.message || e}`); }
+// Auto-connect if local .env already present
+try {
+  const local = readEnvFile(LOCAL_ENV);
+  if (local.AUTH && local.ORCH_URL) connect({ auth: local.AUTH, orch_url: local.ORCH_URL });
+} catch (e) { log("warn", "auto-connect skipped", e?.message || e); }
 
+// AnythingLLM agent skill contract
 module.exports.runtime = {
-  handler: async function ({ command }) {
-    const action = String(command || "status").toLowerCase();
-    const caller = `${this.config.name}-v${this.config.version}`;
-    try {
-      this.introspect(`${caller} invoked with command=${action}`);
-      if (action === "restart") {
-        if (ws && ws.terminate) { try { ws.terminate(); } catch {} }
-        ws = null; inFlight = null; startBridge();
-        return "[Cathedral-MPC-Bridge] restart signal sent";
-      }
-      const env = normalize(readEnv());
-      return `[Cathedral-MPC-Bridge] running. ws=${ORCH_URL}. env.keys=${Object.keys(env).join(",")}`;
-    } catch (e) {
-      this.introspect(`${caller} failed: ${e?.message || e}`);
-      return `Bridge failed: ${e?.message || e}`;
+  // The handler MUST return a string. Reference docs. 
+  // Docs: plugin.json and handler.js rules. 
+  // This satisfies Desktop loader that reads entrypoint.params and invokes runtime.handler. 
+  handler: async function ({ action, orch_url, auth }) {
+    const act = String(action || "status").toLowerCase();
+    if (act === "configure") {
+      const local = readEnvFile(LOCAL_ENV);
+      if (auth) local.AUTH = auth;
+      if (orch_url) local.ORCH_URL = orch_url;
+      if (!local.AUTH) return "Please supply 'auth' Bearer token";
+      if (!local.ORCH_URL) local.ORCH_URL = "ws://homeassistant.local:5005/mcp";
+      writeEnvAtomically(LOCAL_ENV, local);
+      return "configured";
     }
+    if (act === "connect") { return `bridge ${connect({ orch_url, auth })}`; }
+    if (act === "restart") { closeBridge(); return `bridge ${connect({ orch_url, auth })}`; }
+    const hb = _hb ? "alive" : "idle";  // status
+    const ws = _ws ? "open" : "closed";
+    return `status ws=${ws} hb=${hb} url=${_orchUrl||"unset"}`;
   }
 };
