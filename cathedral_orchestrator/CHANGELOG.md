@@ -1,5 +1,10 @@
 # Cathedral Orchestrator – Changelog
 
+## [0.2.11]
+- Probe each LM host with an isolated HTTPX client during hostpool refreshes and catalog aggregation so transient failures never poison other hosts.
+- Log exception class names for host discovery failures and retain the last probe results for operators and diagnostics.
+- Add `/debug/probe` to trigger an on-demand host refresh with JSON status output for manual troubleshooting.
+
 ## [0.2.10]
 - Stabilize LM bootstrap by refreshing hosts with short-lived probe clients and keeping retries resilient in the background loop.
 - Swap model catalogs only after successful responses so cached metadata persists through outages while context windows are normalized on refresh.

@@ -1,5 +1,9 @@
 # Cathedral Orchestrator Docs Changelog
 
+## 0.2.11
+- Document `/debug/probe` for on-demand LM host diagnostics and enumerate the per-host exception metadata it returns.
+- Capture the isolated HTTPX client strategy so operators know timeouts on one host no longer poison the pool for others.
+
 ## 0.2.6
 - Document the non-blocking s6 startup probe flow and background bootstrap loop so operators know the API will come up even when LM hosts are offline.
 - Capture the immediate `/api/options` refresh semantics and tightened LM client timeouts to guide troubleshooting for hostpool updates.

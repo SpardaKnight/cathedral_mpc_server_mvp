@@ -19,11 +19,11 @@ repo root
 ```
 
 ## Runtime Surface
-* **HTTP 8001/tcp** – OpenAI-compatible REST endpoints: `/v1/models`, `/v1/chat/completions`, `/v1/embeddings`, plus `/api/options`, `/api/status`, and `/health`. `/v1/models` enriches each model with LM Studio-provided context window and embedding hints so desktop clients (AnythingLLM, LM Studio) can auto-size prompts. Chat completions now enforce `text/event-stream`, detect client disconnects, apply idle timeouts, and synthesize `data: [DONE]` frames when upstream stalls.
+* **HTTP 8001/tcp** – OpenAI-compatible REST endpoints: `/v1/models`, `/v1/chat/completions`, `/v1/embeddings`, plus `/api/options`, `/api/status`, `/health`, and `/debug/probe`. `/v1/models` enriches each model with LM Studio-provided context window and embedding hints so desktop clients (AnythingLLM, LM Studio) can auto-size prompts. Chat completions now enforce `text/event-stream`, detect client disconnects, apply idle timeouts, and synthesize `data: [DONE]` frames when upstream stalls.
 * **WebSocket 5005/tcp** – MPC WebSocket server mounted under `/mcp`. Handles Cathedral tool flows and applies the single-writer constraint for automations.
 * **Supervisor APIs** – `/api/options` accepts JSON payloads to hot-apply configuration; `/api/status` surfaces current options for troubleshooting.
 
-`/api/status` merges all configured LM hosts into a single model catalog, reports per-host health, exposes LM/Chroma readiness, and tracks active session counts so operators can confirm routing, host affinity, and Chroma collection provisioning at a glance.
+`/api/status` merges all configured LM hosts into a single model catalog, reports per-host health, exposes LM/Chroma readiness, and tracks active session counts so operators can confirm routing, host affinity, and Chroma collection provisioning at a glance. `/debug/probe` triggers an immediate host refresh with per-host counts and the most recent error class/message so operators can validate connectivity without waiting for the background loop.
 
 The Home Assistant watchdog is configured for `tcp://[HOST]:[PORT:8001]`. A resilient background bootstrap loop now refreshes LM hosts, model catalogs, and readiness flags without blocking startup, so the API remains available even if LM Studio is offline. The s6 `start.sh` probe logs warnings when hosts are unreachable but proceeds to launch Uvicorn immediately, relying on the background loop to finalize readiness. `/health` continues to gate Supervisor readiness and reports `bootstrap_pending` until probes succeed.
 
@@ -58,7 +58,7 @@ Full schema guidance lives in [docs/schemas/ADDON_OPTIONS.md](schemas/ADDON_OPTI
 
 ## Concurrency
 * Server-Sent Events enforce `text/event-stream`, monitor client disconnects, and enforce a five-minute idle timeout. The relay injects `data: [DONE]` when upstreams terminate without sending the sentinel so clients do not hang.
-* LM HTTP clients are shared across requests with `max_connections=100` and `max_keepalive_connections=20` to balance concurrency and memory footprint, and short (5s connect/read) probe timeouts keep host refresh loops responsive while streaming relays spin up dedicated clients with unlimited read windows.
+* LM HTTP clients are shared across requests with `max_connections=100` and `max_keepalive_connections=20` to balance concurrency and memory footprint, while host discovery and catalog refreshes spin up fresh, short-lived HTTPX clients per host so a timeout on one base never poisons the others. Streaming relays still reuse the long-lived pool with unlimited read windows.
 * Uvicorn runs with `uvloop` and `httptools` (provided by the add-on image) for efficient async dispatch. MPC WebSocket sessions share the same event loop, and SQLite writes rely on WAL mode to avoid blocking.
 
 ## Security
@@ -113,6 +113,9 @@ curl -s http://homeassistant.local:8001/api/options \
 
 # Health probe summarizing LM reachability and Chroma mode
 curl -s http://homeassistant.local:8001/health | jq
+
+# On-demand host probe with error diagnostics
+curl -s http://homeassistant.local:8001/debug/probe | jq
 ```
 
 Remember: only one orchestrator instance should write to the shared `/data` volume to maintain consistency.

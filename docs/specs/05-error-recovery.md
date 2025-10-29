@@ -1,9 +1,10 @@
 # Error Recovery Specification
 
 ## LM Host Failures
-- Each LM request logs `lm_models_fail` when `/v1/models` probing fails. Operators should check Supervisor logs for the host URL and underlying exception string.
+- Each LM request logs `lm_models_fail` when `/v1/models` probing fails. Operators should check Supervisor logs for the host URL and underlying exception string. Hostpool refreshes now include the exception class name and retain the latest probe snapshot for diagnostics.
 - During chat completion errors, the orchestrator relays upstream HTTP status codes. Clients receive the original error body when available.
 - If all hosts fail discovery, `_route_for_model` falls back to the first configured host; missing models yield upstream 404s.
+- `/debug/probe` is available for manual verification. It spawns fresh HTTPX clients per host to avoid reusing poisoned connections, returning per-host counts and failure metadata immediately.
 
 ## Chroma Upsert Errors
 - Chroma upserts run through `vector/chroma_client.py`. Exceptions during `upsert` emit structured logs with error context.
