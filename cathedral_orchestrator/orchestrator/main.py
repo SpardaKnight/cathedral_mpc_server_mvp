@@ -187,6 +187,8 @@ class HostPool:
         self._hosts: Dict[str, str] = {}
         self._catalog: Dict[str, List[str]] = {}
         self._alive: Dict[str, bool] = {}
+        self._last_counts: Dict[str, int] = {}
+        self._last_errors: Dict[str, Optional[Dict[str, str]]] = {}
         self._lock = asyncio.Lock()
         self.update_hosts(hosts)
 
@@ -199,8 +201,12 @@ class HostPool:
         for base in list(self._alive.keys()):
             if base not in self._hosts.values():
                 self._alive.pop(base, None)
+                self._last_counts.pop(base, None)
+                self._last_errors.pop(base, None)
         for base in self._hosts.values():
             self._alive.setdefault(base, False)
+            self._last_counts.setdefault(base, 0)
+            self._last_errors.setdefault(base, None)
 
     def list_hosts(self) -> List[str]:
         return [host.rstrip("/") for host in self._hosts.values()]
@@ -220,54 +226,87 @@ class HostPool:
         if not self._hosts:
             async with self._lock:
                 self._catalog = {}
+                self._last_counts = {}
+                self._last_errors = {}
             self._alive = {}
             jlog(logger, level="DEBUG", event="hostpool_refresh", hosts=0)
             return {}
 
         timeout = httpx.Timeout(connect=1.5, read=5.0, write=5.0, pool=None)
         counts: Dict[str, int] = {}
+        errors: Dict[str, Optional[Dict[str, str]]] = {}
         results: Dict[str, List[str]] = {}
-        async with httpx.AsyncClient(timeout=timeout, http2=False) as client:
-            bases = self.list_hosts()
-            calls = [
-                client.get(
+
+        async def probe(base: str) -> Tuple[str, List[str]]:
+            async with httpx.AsyncClient(timeout=timeout, http2=False) as client:
+                resp = await client.get(
                     f"{base}/v1/models",
                     headers={"Accept": "application/json"},
                     follow_redirects=True,
                 )
-                for base in bases
-            ]
-            responses = await asyncio.gather(*calls, return_exceptions=True)
-            for base, resp in zip(bases, responses):
-                try:
-                    if isinstance(resp, BaseException):
-                        raise resp
-                    resp.raise_for_status()
-                    payload = resp.json()
-                    data = payload.get("data") if isinstance(payload, dict) else None
-                    items = data if isinstance(data, list) else []
-                    models: List[str] = []
-                    for item in items:
-                        if isinstance(item, dict):
-                            mid = item.get("id") or item.get("name")
-                            if mid:
-                                models.append(str(mid))
-                    counts[base] = len(models)
-                    results[base] = models
-                    self._alive[base] = len(models) > 0
-                    jlog(logger, level="DEBUG", event="hostpool_probe_ok", host=base, models=len(models))
-                except Exception as exc:
-                    counts[base] = 0
-                    self._alive[base] = False
-                    jlog(logger, level="WARN", event="hostpool_refresh_failed", host=base, error=str(exc))
+            resp.raise_for_status()
+            payload = resp.json()
+            data = payload.get("data") if isinstance(payload, dict) else None
+            items = data if isinstance(data, list) else []
+            models: List[str] = []
+            for item in items:
+                if isinstance(item, dict):
+                    mid = item.get("id") or item.get("name")
+                    if mid:
+                        models.append(str(mid))
+            return base, models
+
+        bases = self.list_hosts()
+        tasks = [probe(base) for base in bases]
+        responses = await asyncio.gather(*tasks, return_exceptions=True)
+        for base, resp in zip(bases, responses):
+            try:
+                if isinstance(resp, BaseException):
+                    raise resp
+                _, models = resp
+                counts[base] = len(models)
+                results[base] = models
+                self._alive[base] = len(models) > 0
+                errors[base] = None
+                jlog(
+                    logger,
+                    level="DEBUG",
+                    event="hostpool_probe_ok",
+                    host=base,
+                    models=len(models),
+                )
+            except Exception as exc:
+                counts[base] = 0
+                self._alive[base] = False
+                message = str(exc).strip()
+                if not message:
+                    message = repr(exc)
+                errors[base] = {
+                    "error": message,
+                    "error_class": type(exc).__name__,
+                }
+                jlog(
+                    logger,
+                    level="WARN",
+                    event="hostpool_refresh_failed",
+                    host=base,
+                    error=message,
+                    error_class=type(exc).__name__,
+                )
         async with self._lock:
             for base, models in results.items():
                 self._catalog[base] = models
             for base in list(self._catalog.keys()):
                 if base not in counts:
                     self._catalog.pop(base, None)
+            self._last_counts = dict(counts)
+            self._last_errors = dict(errors)
         jlog(logger, event="hostpool_refreshed", counts=counts)
         return counts
+
+    async def get_last_probe(self) -> Tuple[Dict[str, int], Dict[str, Optional[Dict[str, str]]]]:
+        async with self._lock:
+            return dict(self._last_counts), dict(self._last_errors)
 
     async def get_catalog(self) -> Dict[str, List[str]]:
         async with self._lock:
@@ -537,9 +576,13 @@ async def _refresh_model_catalog() -> bool:
     # Use a short lived, bounded client for catalog aggregation so a misbehaving host
     # cannot stall the bootstrap loop. Streaming continues to use APP_CLIENTS["lm"].
     timeout = httpx.Timeout(connect=1.5, read=5.0, write=5.0, pool=None)
-    async with httpx.AsyncClient(timeout=timeout, http2=False) as _catalog_client:
-        tasks = [list_models_from_host(_catalog_client, host) for host in hosts]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def gather_from_host(host: str) -> Tuple[str, List[Dict[str, Any]]]:
+        async with httpx.AsyncClient(timeout=timeout, http2=False) as _catalog_client:
+            return await list_models_from_host(_catalog_client, host)
+
+    tasks = [gather_from_host(host) for host in hosts]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
     new_catalog: Dict[str, List[str]] = {}
     merged_objects: Dict[str, Dict[str, Any]] = {}
@@ -549,12 +592,16 @@ async def _refresh_model_catalog() -> bool:
     for host, result in zip(hosts, results):
         if isinstance(result, BaseException):
             health[host] = "down"
+            message = str(result).strip()
+            if not message:
+                message = repr(result)
             jlog(
                 logger,
                 level="WARN",
                 event="model_catalog_gather_failed",
                 host=host,
-                error=str(result),
+                error=message,
+                error_class=type(result).__name__ if isinstance(result, BaseException) else type(result).__name__,
             )
             continue
         responded = True
@@ -877,6 +924,45 @@ async def api_status() -> JSONResponse:
         chroma_ready=chroma_ready,
     )
     return JSONResponse(response)
+
+
+@app.get("/debug/probe")
+async def debug_probe() -> JSONResponse:
+    if HOST_POOL is None or not HOST_POOL.has_hosts():
+        raise HTTPException(status_code=503, detail="no lm hosts configured")
+
+    counts = await HOST_POOL.refresh()
+    last_counts, last_errors = await HOST_POOL.get_last_probe()
+
+    hosts: List[Dict[str, Any]] = []
+    for base in HOST_POOL.list_hosts():
+        count = counts.get(base, last_counts.get(base, 0))
+        error_info = last_errors.get(base)
+        status = "ok" if count > 0 else "unreachable"
+        detail: Optional[Dict[str, str]] = None
+        if error_info:
+            detail = {
+                "error": error_info.get("error", ""),
+                "error_class": error_info.get("error_class", ""),
+            }
+        elif count == 0:
+            status = "no_models"
+        entry: Dict[str, Any] = {
+            "host": base.rstrip("/"),
+            "model_count": count,
+            "status": status,
+        }
+        if detail:
+            entry["detail"] = detail
+        hosts.append(entry)
+
+    jlog(
+        logger,
+        event="debug_probe",
+        hosts=len(hosts),
+        reachable=sum(1 for item in hosts if item["status"] == "ok"),
+    )
+    return JSONResponse({"hosts": hosts})
 
 
 @app.get("/api/options")

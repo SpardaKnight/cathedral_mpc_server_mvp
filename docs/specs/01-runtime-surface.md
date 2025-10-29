@@ -12,6 +12,7 @@
 | `/api/options` | POST | Hot-applies new options. | JSON subset matching schema. | `{ "ok": true, "applied": {...} }` | Updates LM host map and reinitializes Chroma client in-place. Persist via Supervisor API for restart durability. |
 | `/api/status` | GET | Exposes timestamp and active options. | None | `{ "ts": <unix>, "options": {...} }` | Internal status view. |
 | `/health` | GET | Aggregated health probe. | None | `{ "ok": true, "lm_hosts": {...}, "chroma": {...} }` | Fan-out to all LM hosts plus Chroma `.health()`. Returns 503 when HTTP client pool not ready. |
+| `/debug/probe` | GET | Triggers an immediate LM host probe. | None | `{ "hosts": [{"host": ..., "model_count": ..., "status": ..., "detail": {...}}] }` | Uses per-host short-lived HTTPX clients so one failure cannot poison other connections. |
 
 ## WebSocket + MPC (port 5005)
 
