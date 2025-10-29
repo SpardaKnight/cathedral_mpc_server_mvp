@@ -1,5 +1,11 @@
 # Cathedral Orchestrator – Changelog
 
+## [0.2.10]
+- Stabilize LM bootstrap by refreshing hosts with short-lived probe clients and keeping retries resilient in the background loop.
+- Swap model catalogs only after successful responses so cached metadata persists through outages while context windows are normalized on refresh.
+- Update readiness reporting to include cached catalog state, keeping `/health` and `/api/status` aligned once hosts recover.
+- `/v1/models` now includes a normalized `context_window` hint when upstream does not provide one. Upstream fields remain intact.
+
 ## [0.2.9]
 - Make `/v1/models` strict pass-through with no schema mutation.
 - Provide `/api/models/metadata` that merges `/api/v0/models` `max_context_length` without altering `/v1/models`.
