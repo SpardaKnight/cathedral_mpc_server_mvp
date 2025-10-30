@@ -1,5 +1,12 @@
 # Cathedral Orchestrator – Changelog
 
+## [0.2.12]
+- Add Home Assistant services discovery via Supervisor `/core/api/services` with TTL cache in ToolBridge.
+- Advertise discovered tools in `agents.list` and expose `tools.list` over MPC so clients can enumerate `light.turn_on`, `switch.toggle`, `scene.activate`, and more.
+- Invalidate tools cache on options reload when `allowed_domains` changes to keep agent skills accurate.
+- Preserve pass-through behavior for `/v1` when MPC bridge is disabled. No schema changes to OpenAI-compatible responses.
+- Bump add-on manifests so Home Assistant detects this update.
+
 ## [0.2.11]
 - Probe each LM host with an isolated HTTPX client during hostpool refreshes and catalog aggregation so transient failures never poison other hosts.
 - Log exception class names for host discovery failures and retain the last probe results for operators and diagnostics.
