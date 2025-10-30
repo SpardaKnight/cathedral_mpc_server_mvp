@@ -1,5 +1,11 @@
 # Cathedral Orchestrator – Changelog
 
+## [0.2.13]
+- Add MPC `session.handshake` and `session.resume` to bind workspace and thread, optionally adopting a verified Home Assistant long-lived token.
+- ToolBridge now prefers a verified long-lived token over the Supervisor token and exposes verification plus cache-safe adoption.
+- Preserve pass-through behavior for `/v1` and existing MPC flows when handshake is unused.
+- Bump Supervisor manifests so Home Assistant surfaces the update.
+
 ## [0.2.12]
 - Add Home Assistant services discovery via Supervisor `/core/api/services` with TTL cache in ToolBridge.
 - Advertise discovered tools in `agents.list` and expose `tools.list` over MPC so clients can enumerate `light.turn_on`, `switch.toggle`, `scene.activate`, and more.

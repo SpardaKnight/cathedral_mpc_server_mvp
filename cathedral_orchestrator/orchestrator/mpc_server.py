@@ -98,6 +98,57 @@ class MPCServer:
         jlog(logger, event="mpc_tools_cache_refresh", count=len(tools))
         return tools
 
+    async def _session_handshake(self, msg: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Handshake from a client to bind workspace and thread, and optionally present a Home Assistant long-lived token.
+        If a token is provided, verify it first; only then adopt it for ToolBridge.
+        Returns {ok, session_id, workspace_id, thread_id}.
+        """
+        workspace_id = msg.get("workspace_id") or "default"
+        thread_id = msg.get("thread_id")
+        payload = msg.get("payload") or {}
+        ha_token = msg.get("ha_token") or payload.get("ha_token")
+
+        # Verify HA token if present
+        if ha_token:
+            ok = await self.tb.verify_ha_token(ha_token)
+            if not ok:
+                return {"ok": False, "error": "ha_token_invalid"}
+            # Adopt it for subsequent ToolBridge calls
+            self.tb.set_long_lived_token(ha_token)
+            jlog(logger, event="mpc_ha_token_adopted", workspace_id=workspace_id)
+
+        # Mint a thread if not provided
+        if not thread_id:
+            thread_id = f"thr_{uuid.uuid4().hex[:12]}"
+        await sessions.upsert_session(workspace_id, thread_id)
+        session_id = f"{workspace_id}:{thread_id}"
+        jlog(
+            logger,
+            event="mpc_session_bound",
+            session_id=session_id,
+            workspace_id=workspace_id,
+            thread_id=thread_id,
+        )
+        return {"ok": True, "session_id": session_id, "workspace_id": workspace_id, "thread_id": thread_id}
+
+    async def _session_resume(self, msg: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Resume or assert a session exists. Creates the row if missing to be idempotent.
+        """
+        workspace_id = msg.get("workspace_id") or "default"
+        thread_id = msg.get("thread_id")
+        if not thread_id:
+            return {"ok": False, "error": "missing_thread_id"}
+        await sessions.upsert_session(workspace_id, thread_id)
+        jlog(logger, event="mpc_session_resumed", workspace_id=workspace_id, thread_id=thread_id)
+        return {
+            "ok": True,
+            "session_id": f"{workspace_id}:{thread_id}",
+            "workspace_id": workspace_id,
+            "thread_id": thread_id,
+        }
+
     async def _assign_session_host(
         self, workspace_id: str, thread_id: str
     ) -> Tuple[Optional[str], Optional[str]]:
@@ -246,7 +297,12 @@ class MPCServer:
                         res = {"ok": True, "tools": await self._tools_list_cached()}
                     elif scope and scope.startswith("tools."):
                         res = await self._handle_tools(msg)
+                    elif scope == "session.handshake":
+                        res = await self._session_handshake(msg)
+                    elif scope == "session.resume":
+                        res = await self._session_resume(msg)
                     elif scope and scope.startswith("session."):
+                        # Fall back to existing handler for other session.* actions
                         res = await self._handle_session(msg)
                     elif scope and scope.startswith("memory."):
                         res = await self._handle_memory(msg)
