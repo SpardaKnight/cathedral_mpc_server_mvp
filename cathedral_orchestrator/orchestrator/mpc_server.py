@@ -53,6 +53,10 @@ class MPCServer:
         self._collection_name_provider = collection_name_provider
         self._upsert_allowed = upsert_allowed
         self._auto_config_allowed = auto_config_allowed
+        # Small TTL cache for tools list to avoid hammering HA
+        self._tools_cache: Optional[List[Dict[str, Any]]] = None
+        self._tools_cache_ts: float = 0.0
+        self._tools_ttl: float = 300.0
 
     def update_chroma(self, chroma: Optional[ChromaClient]) -> None:
         self.chroma = chroma
@@ -82,6 +86,17 @@ class MPCServer:
         allowed = self._auto_config_allowed()
         jlog(logger, event="mpc_server_auto_config_state", allowed=allowed)
         return allowed
+
+    async def _tools_list_cached(self) -> List[Dict[str, Any]]:
+        now = time.time()
+        if self._tools_cache is not None and (now - self._tools_cache_ts) < self._tools_ttl:
+            jlog(logger, event="mpc_tools_cache_hit", count=len(self._tools_cache))
+            return self._tools_cache
+        tools = await self.tb.list_services()
+        self._tools_cache = tools
+        self._tools_cache_ts = now
+        jlog(logger, event="mpc_tools_cache_refresh", count=len(tools))
+        return tools
 
     async def _assign_session_host(
         self, workspace_id: str, thread_id: str
@@ -165,9 +180,11 @@ class MPCServer:
 
         if scope == "agents.list":
             personas = sorted(persona_manager.list_personas().keys())
+            tools = await self._tools_list_cached()
             payload: Dict[str, Any] = {
                 "agents": [agent_record],
                 "personas": personas,
+                "tools": tools,
             }
         elif scope in {"agents.get", "agents.describe"}:
             payload = {"agent": agent_record}
@@ -225,7 +242,9 @@ class MPCServer:
                 scope = msg.get("scope")
                 rid = msg.get("id") or str(uuid.uuid4())
                 try:
-                    if scope and scope.startswith("tools."):
+                    if scope == "tools.list":
+                        res = {"ok": True, "tools": await self._tools_list_cached()}
+                    elif scope and scope.startswith("tools."):
                         res = await self._handle_tools(msg)
                     elif scope and scope.startswith("session."):
                         res = await self._handle_session(msg)

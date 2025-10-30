@@ -1,13 +1,13 @@
 import asyncio
 import json
 import os
-import uuid
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, cast
 
+import uuid
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -31,6 +31,43 @@ OPTIONS_LOCK = asyncio.Lock()
 # Cache of upstream model object payloads keyed by model id.
 # Consumers rely on mutation-in-place semantics.
 MODEL_OBJECTS: Dict[str, Dict[str, Any]] = {}
+
+# Cathedral session binding headers
+SESSION_HEADER = "X-Cathedral-Session"
+WORKSPACE_HEADER = "X-Cathedral-Workspace"
+
+
+async def _mint_session_token(workspace_id: str) -> str:
+    thread_id = f"thr_{uuid.uuid4().hex[:12]}"
+    await sessions.upsert_session(workspace_id, thread_id)
+    token = f"{workspace_id}:{thread_id}"
+    jlog(
+        logger,
+        event="mpc_session_bound",
+        session_id=token,
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+    )
+    return token
+
+
+async def _bind_http_session(request: Request) -> Tuple[Optional[str], Optional[str], Optional[str], bool]:
+    """Return (workspace_id, thread_id, token, created). No-op if bridge disabled or on error."""
+    try:
+        if not bool(CURRENT_OPTIONS.get("bridge_enabled", True)):
+            return None, None, None, False
+        header = request.headers.get(SESSION_HEADER)
+        if header and ":" in header:
+            workspace_id, thread_id = header.split(":", 1)
+            await sessions.touch_session(workspace_id, thread_id)
+            return workspace_id, thread_id, header, False
+        workspace_id = request.headers.get(WORKSPACE_HEADER) or "default"
+        token = await _mint_session_token(workspace_id)
+        _, thread = token.split(":", 1)
+        return workspace_id, thread, token, True
+    except Exception as exc:  # pragma: no cover - never break relay
+        jlog(logger, level="WARN", event="mpc_session_bind_failed", error=str(exc))
+        return None, None, None, False
 
 
 def _normalize_model_token_limits(cache: Dict[str, Dict[str, Any]]) -> None:
@@ -336,6 +373,7 @@ class OptionsModel(BaseModel):
     upserts_enabled: bool = True
     auto_config: bool = True
     auto_discovery: bool = False
+    bridge_enabled: bool = True
     lock_hosts: bool = False
     lock_LMSTUDIO_BASE_PATH: bool = False
     lock_EMBEDDING_BASE_PATH: bool = False
@@ -478,6 +516,12 @@ async def reload_clients_from_options(
     UPSERTS_REQUESTED = bool(options.get("upserts_enabled", UPSERTS_REQUESTED))
 
     tb.allowed_domains = set(ALLOWED_DOMAINS)
+    # Invalidate discovered tools when allowed domains change
+    try:
+        await tb.list_services(force_refresh=True)
+        jlog(logger, event="toolbridge_services_cache_reset", domains=len(tb.allowed_domains))
+    except Exception as exc:
+        jlog(logger, level="WARN", event="toolbridge_services_cache_reset_failed", error=str(exc))
 
     if HOST_POOL is None:
         HOST_POOL = HostPool(LM_HOSTS)
@@ -1306,6 +1350,9 @@ async def relay_chat_completions(request: Request):
     if auth:
         fwd_headers["Authorization"] = auth
 
+    # Bind or resume Cathedral session if bridge is enabled
+    _ws_id, _thr_id, sess_token, created = await _bind_http_session(request)
+
     async def stream_sse():
         saw_done = False
         started = False
@@ -1334,12 +1381,23 @@ async def relay_chat_completions(request: Request):
                 # OpenAI-style terminator
                 yield b"data: [DONE]\n\n"
 
-    return StreamingResponse(stream_sse(), media_type="text/event-stream")
+    response = StreamingResponse(stream_sse(), media_type="text/event-stream")
+    if sess_token:
+        response.headers[SESSION_HEADER] = sess_token
+        if created:
+            response.headers["X-Cathedral-Session-New"] = "1"
+    return response
 
 
 @app.post("/v1/embeddings")
 async def embeddings(request: Request):
     body = await request.json()
+    # If a Cathedral session header is present, bind it into embeddings metadata
+    sess_header = request.headers.get(SESSION_HEADER)
+    if sess_header:
+        meta = body.get("metadata") or {}
+        meta.setdefault("_session", sess_header)
+        body["metadata"] = meta
     model = body.get("model")
     target = await _route_for_model(model) if model else list(LM_HOSTS.values())[0]
     url = target.rstrip("/") + "/v1/embeddings"
