@@ -1,7 +1,7 @@
 import logging
 import os
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -19,6 +19,8 @@ logger = logging.getLogger("cathedral")
 class ToolBridge:
     def __init__(self, allowed_domains: List[str]):
         self.allowed_domains = set(allowed_domains or [])
+        # Optional HA long-lived token; preferred if verified. May also arrive via env.
+        self._ha_long_lived_token: Optional[str] = os.environ.get("HA_LONG_LIVED_TOKEN") or None
         # TTL cache for /api/services projection
         self._svc_cache_items: List[Dict[str, Any]] = []
         self._svc_cache_ts: float = 0.0
@@ -28,6 +30,14 @@ class ToolBridge:
             event="toolbridge_init",
             domains=sorted(self.allowed_domains),
         )
+
+    def _auth_headers(self, override_token: Optional[str] = None) -> Dict[str, str]:
+        """
+        Choose auth header. Preference: explicit override -> verified long-lived token -> Supervisor token.
+        Never log tokens.
+        """
+        token = override_token or self._ha_long_lived_token or SUPERVISOR_TOKEN
+        return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
     async def call(self, tool_name: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         try:
@@ -46,10 +56,7 @@ class ToolBridge:
             return {"ok": False, "error": f"domain_not_allowed:{domain}"}
 
         data = payload or {}
-        headers = {
-            "Authorization": f"Bearer {SUPERVISOR_TOKEN}",
-            "Content-Type": "application/json",
-        }
+        headers = self._auth_headers()
         url = f"{SUPERVISOR_BASE}/core/api/services/{domain}/{service}"
         try:
             async with httpx.AsyncClient(timeout=10) as client:
@@ -106,10 +113,7 @@ class ToolBridge:
             return self._svc_cache_items
 
         url = f"{SUPERVISOR_BASE}/core/api/services"
-        headers = {
-            "Authorization": f"Bearer {SUPERVISOR_TOKEN}",
-            "Content-Type": "application/json",
-        }
+        headers = self._auth_headers()
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(url, headers=headers)
@@ -142,3 +146,31 @@ class ToolBridge:
         self._svc_cache_ts = now
         jlog(logger, event="ha_services_discovered", count=len(tools), domains=len({t["domain"] for t in tools}))
         return tools
+
+    async def verify_ha_token(self, token: str) -> bool:
+        """
+        Verify a Home Assistant long-lived token by hitting the Core API through Supervisor.
+        We use GET /core/api which returns a small JSON when authorized.
+        """
+        url = f"{SUPERVISOR_BASE}/core/api"
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(url, headers=self._auth_headers(override_token=token))
+                if resp.status_code == 200:
+                    jlog(logger, event="toolbridge_token_verify_ok", status=resp.status_code)
+                    return True
+                jlog(logger, level="WARN", event="toolbridge_token_verify_failed", status=resp.status_code)
+                return False
+        except httpx.HTTPError as exc:
+            jlog(logger, level="WARN", event="toolbridge_token_verify_error", error=str(exc))
+            return False
+
+    def set_long_lived_token(self, token: Optional[str]) -> None:
+        """
+        Adopt a verified long-lived token. Do not log the token. Clear service cache so domains refresh under new auth.
+        """
+        self._ha_long_lived_token = token
+        # Drop cache so subsequent discovery uses the new token privileges
+        self._svc_cache_items = []
+        self._svc_cache_ts = 0.0
+        jlog(logger, event="toolbridge_long_lived_token_set", token_present=bool(token))
